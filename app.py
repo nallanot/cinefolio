@@ -195,7 +195,7 @@ def dashboard(days:int=30):
      if today<air<=until:upcoming.append(row)
      elif air<=today and not row['watched']:available.append(row)
    aired=[e for e in episodes if e['air_date']<=today.isoformat()]
-   progress.append({'tmdb_id':item['tmdb_id'],'series':item['title'],'watched':sum(e['watched'] for e in aired),'aired':len(aired),'next_unwatched':next((e for e in sorted(aired,key=lambda x:(x['season'],x['episode'])) if not e['watched']),None)})
+   progress.append({'tmdb_id':item['tmdb_id'],'series':item['title'],'watched':sum(e['watched'] for e in aired),'aired':len(aired),'total':len(episodes),'upcoming':sum(e['air_date']>today.isoformat() for e in episodes),'watched_total':sum(e['watched'] for e in episodes),'next_unwatched':next((e for e in sorted(aired,key=lambda x:(x['season'],x['episode'])) if not e['watched']),None)})
   except Exception as exc:
    progress.append({'tmdb_id':item['tmdb_id'],'series':item['title'],'error':str(exc)})
  return {'upcoming':sorted(upcoming,key=lambda x:x['air_date']),'available':sorted(available,key=lambda x:x['air_date'],reverse=True),'progress':progress,'date':today.isoformat(),'note':'Dates de diffusion originale TMDB, pas disponibilité garantie au Canada.'}
