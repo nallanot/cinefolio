@@ -1,0 +1,13 @@
+services:
+  cinefolio:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "127.0.0.1:8098:8000"
+    volumes:
+      - cinefolio_data:/data
+    security_opt:
+      - no-new-privileges:true
+volumes:
+  cinefolio_data:
