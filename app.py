@@ -226,3 +226,11 @@ def refresh_posters():
     updated+=1
   except Exception:failed+=1
  return {'checked':len(missing),'updated':updated,'failed':failed}
+
+@app.get('/api/watch-providers/{kind}/{id}')
+def watch_providers(kind:str,id:int,region:str='CA'):
+ if kind not in ('tv','movie'):raise HTTPException(400,'Type de contenu invalide')
+ if len(region)!=2 or not region.isalpha():raise HTTPException(400,'Région invalide')
+ data=tmdb(f'{kind}/{id}/watch/providers')
+ country=data.get('results',{}).get(region.upper(),{})
+ return {'region':region.upper(),'link':country.get('link'),'flatrate':country.get('flatrate',[]),'free':country.get('free',[]),'ads':country.get('ads',[]),'rent':country.get('rent',[]),'buy':country.get('buy',[]),'source':'TMDB / JustWatch'}
