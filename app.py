@@ -1,10 +1,12 @@
-import os, sqlite3, urllib.request, urllib.parse, json
+import os, sqlite3, urllib.request, urllib.parse, json, time, threading
 from contextlib import closing
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 DB='/data/library.db'; KEY=os.getenv('TMDB_API_KEY','')
 app=FastAPI(title='Cinefolio')
+_tmdb_cache={}
+_tmdb_lock=threading.Lock()
 def conn():
  c=sqlite3.connect(DB); c.row_factory=sqlite3.Row; return c
 @app.on_event('startup')
@@ -15,8 +17,16 @@ def init():
 def tmdb(path,params=None):
  if not KEY: raise HTTPException(503,'Configurez TMDB_API_KEY dans .env')
  q=urllib.parse.urlencode(dict(params or {},api_key=KEY,language='fr-CA'))
+ cache_key=(path,q)
+ with _tmdb_lock:
+  hit=_tmdb_cache.get(cache_key)
+  if hit and time.monotonic()-hit[0]<900:return hit[1]
  try:
-  with urllib.request.urlopen('https://api.themoviedb.org/3/'+path+'?'+q,timeout=12) as r:return json.load(r)
+  with urllib.request.urlopen('https://api.themoviedb.org/3/'+path+'?'+q,timeout=12) as r:data=json.load(r)
+  with _tmdb_lock:
+   if len(_tmdb_cache)>1200:_tmdb_cache.clear()
+   _tmdb_cache[cache_key]=(time.monotonic(),data)
+  return data
  except Exception as e:raise HTTPException(502,'Erreur TMDB : '+str(e))
 class Item(BaseModel):
  kind:str;tmdb_id:int;title:str;poster:str|None=None
@@ -84,6 +94,16 @@ def dashboard(days:int=30):
      elif air<=today and not row['watched']:available.append(row)
    aired=[e for e in episodes if e['air_date']<=today.isoformat()]
    progress.append({'tmdb_id':item['tmdb_id'],'series':item['title'],'watched':sum(e['watched'] for e in aired),'aired':len(aired),'next_unwatched':next((e for e in sorted(aired,key=lambda x:(x['season'],x['episode'])) if not e['watched']),None)})
-  except HTTPException as exc:
+  except Exception as exc:
    progress.append({'tmdb_id':item['tmdb_id'],'series':item['title'],'error':exc.detail})
  return {'upcoming':sorted(upcoming,key=lambda x:x['air_date']),'available':sorted(available,key=lambda x:x['air_date'],reverse=True),'progress':progress,'date':today.isoformat(),'note':'Dates de diffusion originale TMDB, pas disponibilité garantie au Canada.'}
+
+@app.get('/api/featured')
+def featured():
+ with closing(conn()) as c:
+  item=c.execute("SELECT tmdb_id FROM library WHERE kind='tv' ORDER BY title LIMIT 1").fetchone()
+ if not item:return {}
+ try:
+  d=tmdb(f"tv/{item['tmdb_id']}")
+  return {'id':item['tmdb_id'],'backdrop_path':d.get('backdrop_path'),'name':d.get('name'),'overview':d.get('overview')}
+ except Exception:return {}
