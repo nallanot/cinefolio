@@ -2,7 +2,8 @@ services:
   cinefolio:
     build: .
     restart: unless-stopped
-    env_file: .env
+    environment:
+      TMDB_API_KEY: ${TMDB_API_KEY:-}
     networks:
       - traefik
     volumes:
