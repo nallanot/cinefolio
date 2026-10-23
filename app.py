@@ -58,3 +58,32 @@ def episode(e:Episode):
  return {'ok':True}
 @app.get('/',response_class=HTMLResponse)
 def home():return open('/app/index.html').read()
+
+from datetime import date, timedelta
+@app.get('/api/dashboard')
+def dashboard(days:int=30):
+ days=max(1,min(days,120)); today=date.today(); until=today+timedelta(days=days)
+ with closing(conn()) as c:
+  shows=[dict(x) for x in c.execute("SELECT * FROM library WHERE kind='tv'")]
+  seen={(x['tmdb_id'],x['season'],x['episode']) for x in c.execute('SELECT tmdb_id,season,episode FROM episodes')}
+ upcoming=[]; available=[]; progress=[]
+ for item in shows:
+  try:
+   detail=tmdb(f"tv/{item['tmdb_id']}")
+   seasons=[s for s in detail.get('seasons',[]) if s.get('season_number',0)>0]
+   episodes=[]
+   for season in seasons:
+    data=tmdb(f"tv/{item['tmdb_id']}/season/{season['season_number']}")
+    for ep in data.get('episodes',[]):
+     if not ep.get('air_date'):continue
+     try:air=date.fromisoformat(ep['air_date'])
+     except ValueError:continue
+     row={'tmdb_id':item['tmdb_id'],'series':item['title'],'poster':item['poster'],'season':season['season_number'],'episode':ep['episode_number'],'title':ep.get('name'),'air_date':ep['air_date'],'watched':(item['tmdb_id'],season['season_number'],ep['episode_number']) in seen}
+     episodes.append(row)
+     if today<air<=until:upcoming.append(row)
+     elif air<=today and not row['watched']:available.append(row)
+   aired=[e for e in episodes if e['air_date']<=today.isoformat()]
+   progress.append({'tmdb_id':item['tmdb_id'],'series':item['title'],'watched':sum(e['watched'] for e in aired),'aired':len(aired),'next_unwatched':next((e for e in sorted(aired,key=lambda x:(x['season'],x['episode'])) if not e['watched']),None)})
+  except HTTPException as exc:
+   progress.append({'tmdb_id':item['tmdb_id'],'series':item['title'],'error':exc.detail})
+ return {'upcoming':sorted(upcoming,key=lambda x:x['air_date']),'available':sorted(available,key=lambda x:x['air_date'],reverse=True),'progress':progress,'date':today.isoformat(),'note':'Dates de diffusion originale TMDB, pas disponibilité garantie au Canada.'}
