@@ -3,11 +3,26 @@ services:
     build: .
     restart: unless-stopped
     env_file: .env
-    ports:
-      - "127.0.0.1:8098:8000"
+    networks:
+      - traefik
     volumes:
       - cinefolio_data:/data
     security_opt:
       - no-new-privileges:true
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik_default"
+      - "traefik.http.routers.cinefolio.rule=Host(`cinefolio.allanot.ovh`)"
+      - "traefik.http.routers.cinefolio.entrypoints=websecure"
+      - "traefik.http.routers.cinefolio.tls=true"
+      - "traefik.http.routers.cinefolio.tls.certresolver=ovh"
+      - "traefik.http.routers.cinefolio.service=cinefolio"
+      - "traefik.http.services.cinefolio.loadbalancer.server.port=8000"
+
+networks:
+  traefik:
+    external: true
+    name: traefik_default
+
 volumes:
   cinefolio_data:
