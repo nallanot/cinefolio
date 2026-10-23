@@ -271,3 +271,24 @@ def delete_custom_provider(kind:str,id:int,name:str):
  with closing(conn()) as c:
   c.execute('DELETE FROM custom_providers WHERE kind=? AND tmdb_id=? AND name=?',(kind,id,name));c.commit()
  return {'ok':True}
+
+@app.get('/api/viewing-history')
+def viewing_history():
+ """Viewing dates are the dates users marked episodes as watched (UTC)."""
+ with closing(conn()) as c:
+  rows=[dict(x) for x in c.execute("""SELECT e.tmdb_id,e.season,e.episode,e.watched_at,l.title
+    FROM episodes e LEFT JOIN library l ON l.kind='tv' AND l.tmdb_id=e.tmdb_id
+    ORDER BY e.watched_at DESC""")]
+ runtimes={}
+ for row in rows:
+  key=(row['tmdb_id'],row['season'])
+  if key not in runtimes:
+   try:
+    season_data=tmdb(f"tv/{key[0]}/season/{key[1]}")
+    runtimes[key]={int(ep['episode_number']):ep.get('runtime') for ep in season_data.get('episodes',[])}
+   except Exception:runtimes[key]={}
+  row['minutes']=runtimes[key].get(row['episode'])
+  row['estimated']=False
+  if not isinstance(row['minutes'],int) or row['minutes']<=0:
+   row['minutes']=None
+ return {'episodes':rows,'timezone':'UTC','note':'Dates enregistrées lors du marquage comme vu (UTC), pas nécessairement les dates réelles de visionnage. Durées TMDB disponibles seulement.'}
