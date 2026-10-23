@@ -292,3 +292,82 @@ def viewing_history():
   if not isinstance(row['minutes'],int) or row['minutes']<=0:
    row['minutes']=None
  return {'episodes':rows,'timezone':'UTC','note':'Dates enregistrées lors du marquage comme vu (UTC), pas nécessairement les dates réelles de visionnage. Durées TMDB disponibles seulement.'}
+
+# Netflix viewing activity CSV: explicit preview before applying any changes.
+import csv, io, re
+from datetime import datetime
+class NetflixCSV(BaseModel):
+ csv_text:str
+ confirm:bool=False
+
+def netflix_date(raw):
+ raw=raw.strip()
+ for fmt in ('%m/%d/%y','%m/%d/%Y','%Y-%m-%d','%d/%m/%Y'):
+  try:return datetime.strptime(raw,fmt).strftime('%Y-%m-%d 12:00:00')
+  except ValueError:pass
+ return None
+
+def netflix_episode_title(title):
+ # Netflix generally exports "Series: Season 1: Episode title".
+ parts=[x.strip() for x in title.split(':')]
+ if len(parts)<3:return None
+ match=re.search(r'(?:season|saison|series|série|partie|part)\s*(\d+)',parts[1],re.I)
+ if not match:return None
+ return parts[0],int(match.group(1)),':'.join(parts[2:]).strip()
+
+@app.post('/api/import/netflix')
+def import_netflix(payload:NetflixCSV):
+ if len(payload.csv_text.encode('utf-8'))>3_000_000:raise HTTPException(413,'Fichier trop volumineux (3 Mo maximum)')
+ content=payload.csv_text.lstrip('\ufeff')
+ try:
+  dialect=csv.Sniffer().sniff(content[:4096],delimiters=',;\t')
+  reader=csv.DictReader(io.StringIO(content),dialect=dialect)
+  if not reader.fieldnames:raise ValueError('Entêtes absents')
+  cols={k.strip().lower():k for k in reader.fieldnames}
+  title_col=next((cols[k] for k in ('title','titre') if k in cols),None)
+  date_col=next((cols[k] for k in ('date','date de visionnement','date de visionnage') if k in cols),None)
+  if not title_col or not date_col:raise ValueError('Colonnes Title et Date requises')
+  rows=list(reader)
+ except (csv.Error,ValueError,UnicodeError) as exc:raise HTTPException(400,'CSV Netflix invalide : '+str(exc))
+ if len(rows)>15000:raise HTTPException(413,'Trop de lignes (15 000 maximum)')
+ with closing(conn()) as c:
+  shows=[dict(x) for x in c.execute("SELECT tmdb_id,title FROM library WHERE kind='tv'")]
+  movies=[dict(x) for x in c.execute("SELECT tmdb_id,title FROM library WHERE kind='movie'")]
+  existing={(x['tmdb_id'],x['season'],x['episode']) for x in c.execute('SELECT tmdb_id,season,episode FROM episodes')}
+ norm=lambda t:re.sub(r'[^\w]+',' ',t.casefold()).strip()
+ by_title={norm(x['title']):x['tmdb_id'] for x in shows}
+ movie_titles={norm(x['title']):x['tmdb_id'] for x in movies}
+ cache={}
+ proposed={}; unmatched=[]; movies_found=set(); invalid=0
+ for row in rows:
+  title=(row.get(title_col) or '').strip();when=netflix_date(row.get(date_col) or '')
+  if not title or not when:invalid+=1;continue
+  parsed=netflix_episode_title(title)
+  if parsed:
+   series,season,episode_name=parsed
+   tmdb_id=by_title.get(norm(series))
+   if tmdb_id is None:
+    if len(unmatched)<30:unmatched.append(title)
+    continue
+   key=(tmdb_id,season)
+   if key not in cache:
+    try:cache[key]=tmdb(f'tv/{tmdb_id}/season/{season}').get('episodes',[])
+    except Exception:cache[key]=[]
+   exact=[e for e in cache[key] if norm(e.get('name') or '')==norm(episode_name)]
+   # Never guess episode identity when titles do not match.
+   if len(exact)!=1:
+    if len(unmatched)<30:unmatched.append(title)
+    continue
+   ep=int(exact[0]['episode_number']);episode_key=(tmdb_id,season,ep)
+   if episode_key not in existing:proposed.setdefault(episode_key,when)
+  elif norm(title) in movie_titles:
+   movies_found.add(movie_titles[norm(title)])
+  elif len(unmatched)<30:unmatched.append(title)
+ result={'total_rows':len(rows),'episodes_to_import':len(proposed),'movies_to_mark_watched':len(movies_found),'already_watched_not_overwritten':len(rows)-len(proposed)-len(movies_found)-invalid-len(unmatched),'unmatched_examples':unmatched,'invalid_rows':invalid,'note':'Correspondance exacte avec les séries déjà dans Cinéfolio. Les éléments non reconnus sont ignorés.'}
+ if not payload.confirm:return result
+ with closing(conn()) as c:
+  for (tmdb_id,season,episode),when in proposed.items():
+   c.execute('INSERT OR IGNORE INTO episodes(tmdb_id,season,episode,watched_at) VALUES(?,?,?,?)',(tmdb_id,season,episode,when))
+  for tmdb_id in movies_found:c.execute("UPDATE library SET watched=1 WHERE kind='movie' AND tmdb_id=?",(tmdb_id,))
+  c.commit()
+ return {**result,'imported':True}
