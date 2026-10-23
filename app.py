@@ -13,7 +13,7 @@ def conn():
 def init():
  os.makedirs('/data',exist_ok=True)
  with closing(conn()) as c:
-  c.executescript('CREATE TABLE IF NOT EXISTS library(kind TEXT NOT NULL, tmdb_id INTEGER NOT NULL, title TEXT NOT NULL, poster TEXT, status TEXT DEFAULT "watchlist", watched INTEGER DEFAULT 0, rating INTEGER, PRIMARY KEY(kind,tmdb_id)); CREATE TABLE IF NOT EXISTS episodes(tmdb_id INTEGER NOT NULL, season INTEGER NOT NULL, episode INTEGER NOT NULL, watched_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(tmdb_id,season,episode));');c.execute('CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,username TEXT UNIQUE,display_name TEXT,salt TEXT,password_hash TEXT)');c.execute('CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY,expires INTEGER)');c.commit()
+  c.executescript('CREATE TABLE IF NOT EXISTS library(kind TEXT NOT NULL, tmdb_id INTEGER NOT NULL, title TEXT NOT NULL, poster TEXT, status TEXT DEFAULT "watchlist", watched INTEGER DEFAULT 0, rating INTEGER, PRIMARY KEY(kind,tmdb_id)); CREATE TABLE IF NOT EXISTS episodes(tmdb_id INTEGER NOT NULL, season INTEGER NOT NULL, episode INTEGER NOT NULL, watched_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(tmdb_id,season,episode));');c.execute('CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,username TEXT UNIQUE,display_name TEXT,salt TEXT,password_hash TEXT)');c.execute('CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY,expires INTEGER)');c.execute('CREATE TABLE IF NOT EXISTS custom_providers(kind TEXT NOT NULL,tmdb_id INTEGER NOT NULL,name TEXT NOT NULL,provider_id INTEGER,logo_path TEXT,PRIMARY KEY(kind,tmdb_id,name))');c.commit()
 
 class Credentials(BaseModel):
  username:str
@@ -227,10 +227,47 @@ def refresh_posters():
   except Exception:failed+=1
  return {'checked':len(missing),'updated':updated,'failed':failed}
 
+
+class ProviderSelection(BaseModel):
+ name:str
+ provider_id:int|None=None
+ logo_path:str|None=None
+@app.get('/api/provider-catalog')
+def provider_catalog(kind:str='tv'):
+ if kind not in ('tv','movie'):raise HTTPException(400,'Type invalide')
+ data=tmdb(f'watch/providers/{kind}',{'watch_region':''})
+ providers=data.get('results',[])
+ return sorted([{'provider_id':p['provider_id'],'provider_name':p['provider_name'],'logo_path':p.get('logo_path')} for p in providers],key=lambda p:p['provider_name'].casefold())
 @app.get('/api/watch-providers/{kind}/{id}')
-def watch_providers(kind:str,id:int,region:str='CA'):
- if kind not in ('tv','movie'):raise HTTPException(400,'Type de contenu invalide')
- if len(region)!=2 or not region.isalpha():raise HTTPException(400,'Région invalide')
- data=tmdb(f'{kind}/{id}/watch/providers')
- country=data.get('results',{}).get(region.upper(),{})
- return {'region':region.upper(),'link':country.get('link'),'flatrate':country.get('flatrate',[]),'free':country.get('free',[]),'ads':country.get('ads',[]),'rent':country.get('rent',[]),'buy':country.get('buy',[]),'source':'TMDB / JustWatch'}
+def watch_providers(kind:str,id:int,region:str='ALL'):
+ if kind not in ('tv','movie'):raise HTTPException(400,'Type invalide')
+ region=region.upper()
+ if region!='ALL' and (len(region)!=2 or not region.isalpha()):raise HTTPException(400,'Région invalide')
+ data=tmdb(f'{kind}/{id}/watch/providers').get('results',{})
+ entries=data.items() if region=='ALL' else [(region,data.get(region,{}))]
+ groups={k:{} for k in ('flatrate','free','ads','rent','buy')}
+ for code,country in entries:
+  for key in groups:
+   for p in country.get(key,[]):
+    pid=p.get('provider_id')
+    if pid is None:continue
+    record=groups[key].setdefault(pid,{'provider_id':pid,'provider_name':p.get('provider_name',''),'logo_path':p.get('logo_path'),'regions':[]})
+    if code not in record['regions']:record['regions'].append(code)
+ with closing(conn()) as c:
+  custom=[dict(row) for row in c.execute('SELECT name,provider_id,logo_path FROM custom_providers WHERE kind=? AND tmdb_id=? ORDER BY name',(kind,id))]
+ return {'region':region,'regions':sorted(data.keys()),'link':data.get(region,{}).get('link') if region!='ALL' else None,**{k:sorted(v.values(),key=lambda p:p['provider_name'].casefold()) for k,v in groups.items()},'custom':custom,'source':'TMDB / JustWatch'}
+@app.post('/api/watch-providers/{kind}/{id}/custom')
+def add_custom_provider(kind:str,id:int,item:ProviderSelection):
+ if kind not in ('tv','movie') or id<=0:raise HTTPException(400,'Contenu invalide')
+ name=item.name.strip()
+ if not 1<=len(name)<=100:raise HTTPException(400,'Nom de plateforme invalide')
+ if item.provider_id is not None and item.provider_id<=0:raise HTTPException(400,'Identifiant invalide')
+ logo=item.logo_path if item.logo_path and item.logo_path.startswith('/') and len(item.logo_path)<256 else None
+ with closing(conn()) as c:
+  c.execute('INSERT OR REPLACE INTO custom_providers(kind,tmdb_id,name,provider_id,logo_path) VALUES(?,?,?,?,?)',(kind,id,name,item.provider_id,logo));c.commit()
+ return {'ok':True}
+@app.delete('/api/watch-providers/{kind}/{id}/custom/{name}')
+def delete_custom_provider(kind:str,id:int,name:str):
+ with closing(conn()) as c:
+  c.execute('DELETE FROM custom_providers WHERE kind=? AND tmdb_id=? AND name=?',(kind,id,name));c.commit()
+ return {'ok':True}
