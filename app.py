@@ -41,8 +41,12 @@ def library():
 @app.post('/api/library')
 def add(i:Item):
  if i.kind not in ('tv','movie'):raise HTTPException(400,'Type invalide')
+ poster=i.poster
+ if not poster:
+  try:poster=tmdb(f'{i.kind}/{i.tmdb_id}').get('poster_path')
+  except HTTPException:pass
  with closing(conn()) as c:
-  c.execute('INSERT OR IGNORE INTO library(kind,tmdb_id,title,poster) VALUES(?,?,?,?)',(i.kind,i.tmdb_id,i.title,i.poster));c.commit()
+  c.execute('INSERT OR IGNORE INTO library(kind,tmdb_id,title,poster) VALUES(?,?,?,?)',(i.kind,i.tmdb_id,i.title,poster));c.commit()
  return {'ok':True}
 @app.delete('/api/library/{kind}/{id}')
 def remove(kind:str,id:int):
@@ -107,3 +111,20 @@ def featured():
   d=tmdb(f"tv/{item['tmdb_id']}")
   return {'id':item['tmdb_id'],'backdrop_path':d.get('backdrop_path'),'name':d.get('name'),'overview':d.get('overview')}
  except Exception:return {}
+
+@app.post('/api/library/refresh-posters')
+def refresh_posters():
+ with closing(conn()) as c:
+  missing=[dict(x) for x in c.execute("SELECT kind,tmdb_id FROM library WHERE poster IS NULL OR TRIM(poster)=''")]
+ updated=0; failed=0
+ for item in missing:
+  try:
+   detail=tmdb(f"{item['kind']}/{item['tmdb_id']}")
+   path=detail.get('poster_path')
+   if path:
+    with closing(conn()) as c:
+     c.execute("UPDATE library SET poster=? WHERE kind=? AND tmdb_id=? AND (poster IS NULL OR TRIM(poster)='')",(path,item['kind'],item['tmdb_id']))
+     c.commit()
+    updated+=1
+  except Exception:failed+=1
+ return {'checked':len(missing),'updated':updated,'failed':failed}
