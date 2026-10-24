@@ -734,6 +734,12 @@ def netflix_ai_delete_suggestion(row_id:int):
   c.commit()
  return {'ok':True}
 
+@app.get('/api/import/netflix/movie/{tmdb_id}/details')
+def netflix_movie_proposal_details(tmdb_id:int):
+ if tmdb_id<=0:raise HTTPException(400,'Identifiant TMDB invalide')
+ # Details are public TMDB metadata; this endpoint never confirms or imports.
+ return netflix_movie_details(tmdb_id)
+
 @app.get('/api/import/netflix/ai/suggestions')
 def netflix_ai_list():
  with closing(conn()) as c:
