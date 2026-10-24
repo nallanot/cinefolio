@@ -592,22 +592,35 @@ _ai_jobs={}
 _ai_jobs_lock=threading.Lock()
 
 def _ai_batch_worker(job_id,limit):
+ import time
  with _ai_jobs_lock:_ai_jobs[job_id]['status']='running'
  with closing(conn()) as c:
   rows=c.execute("SELECT u.id FROM netflix_unmatched u LEFT JOIN netflix_ai_suggestions s ON s.row_id=u.id WHERE u.status='pending' AND s.row_id IS NULL ORDER BY u.id LIMIT ?",(limit,)).fetchall()
  with _ai_jobs_lock:_ai_jobs[job_id]['total']=len(rows)
+ consecutive_errors=0
  for row in rows:
   with _ai_jobs_lock:
    if _ai_jobs[job_id]['status']=='cancelled':break
   try:
    result=netflix_ai_suggest(NetflixAIScan(row_id=row['id']))
+   consecutive_errors=0
    with _ai_jobs_lock:
     if result['suggestion']:_ai_jobs[job_id]['matched']+=1
   except Exception as exc:
-   with _ai_jobs_lock:_ai_jobs[job_id]['errors'].append({'id':row['id'],'message':str(getattr(exc,'detail',type(exc).__name__))[:180]})
+   consecutive_errors+=1
+   message=str(getattr(exc,'detail',exc))[:350]
+   with _ai_jobs_lock:_ai_jobs[job_id]['errors'].append({'id':row['id'],'message':message})
   with _ai_jobs_lock:_ai_jobs[job_id]['processed']+=1
+  if consecutive_errors>=3:
+   with _ai_jobs_lock:
+    _ai_jobs[job_id]['status']='stopped'
+    _ai_jobs[job_id]['reason']='Arrêt après 3 erreurs consécutives. Vérifiez le modèle, les quotas et la connectivité Gemini.'
+   break
+  with _ai_jobs_lock:
+   if _ai_jobs[job_id]['status']=='cancelled':break
+  time.sleep(1.5)
  with _ai_jobs_lock:
-  if _ai_jobs[job_id]['status']!='cancelled':_ai_jobs[job_id]['status']='completed'
+  if _ai_jobs[job_id]['status']=='running':_ai_jobs[job_id]['status']='completed'
 
 class NetflixAIBatch(BaseModel):
  limit:int=20
