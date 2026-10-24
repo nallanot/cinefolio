@@ -556,7 +556,7 @@ class NetflixAIScan(BaseModel):
 
 @app.post('/api/import/netflix/ai/suggest')
 def netflix_ai_suggest(payload:NetflixAIScan):
- if not os.getenv('OPENAI_API_KEY'):raise HTTPException(503,'OPENAI_API_KEY manquante')
+ if not os.getenv('GEMINI_API_KEY'):raise HTTPException(503,'GEMINI_API_KEY manquante')
  with closing(conn()) as c:
   row=c.execute("SELECT title FROM netflix_unmatched WHERE id=? AND status='pending'",(payload.row_id,)).fetchone()
  if not row:raise HTTPException(404,'Visionnement introuvable')
@@ -576,7 +576,7 @@ def netflix_ai_suggest(payload:NetflixAIScan):
       episodes.append({'id':item['id'],'season':sn,'episode':ep['episode_number'],'name':ep.get('name','')})
    except Exception:pass
  try:proposal=suggest_match(title,candidates,episodes[:500]) if candidates else None
- except Exception as exc:raise HTTPException(502,'Recherche IA indisponible : '+type(exc).__name__)
+ except Exception as exc:raise HTTPException(502,'Recherche IA indisponible : '+str(exc)[:300])
  with closing(conn()) as c:
   c.execute('INSERT OR REPLACE INTO netflix_ai_suggestions(row_id,proposal_json) VALUES(?,?)',(payload.row_id,json.dumps(proposal)));c.commit()
  return {'id':payload.row_id,'title':title,'suggestion':proposal}
@@ -614,7 +614,7 @@ class NetflixAIBatch(BaseModel):
 
 @app.post('/api/import/netflix/ai/batch')
 def netflix_ai_batch(payload:NetflixAIBatch):
- if not os.getenv('OPENAI_API_KEY'):raise HTTPException(503,'OPENAI_API_KEY manquante')
+ if not os.getenv('GEMINI_API_KEY'):raise HTTPException(503,'GEMINI_API_KEY manquante')
  limit=max(1,min(payload.limit,100))
  with _ai_jobs_lock:
   if any(j['status'] in ('queued','running') for j in _ai_jobs.values()):raise HTTPException(409,'Une analyse IA est déjà en cours')
