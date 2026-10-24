@@ -308,12 +308,17 @@ def netflix_date(raw):
  return None
 
 def netflix_episode_title(title):
- # Netflix generally exports "Series: Season 1: Episode title".
  parts=[x.strip() for x in title.split(':')]
- if len(parts)<3:return None
- match=re.search(r'(?:season|saison|series|série|partie|part)\s*(\d+)',parts[1],re.I)
- if not match:return None
- return parts[0],int(match.group(1)),':'.join(parts[2:]).strip()
+ if len(parts)<2:return None
+ # Netflix exports localized seasons, miniseries and numbered episodes.
+ season_match=re.fullmatch(r'(?:season|saison|series|série|partie|part)\s*(\d+)',parts[1],re.I)
+ if season_match and len(parts)>=3:
+  return parts[0],int(season_match.group(1)),':'.join(parts[2:]).strip()
+ if re.fullmatch(r'(?:miniseries|mini-série|minisérie|limited series)',parts[1],re.I) and len(parts)>=3:
+  return parts[0],1,':'.join(parts[2:]).strip()
+ if re.fullmatch(r'(?:episode|épisode)\s*\d+',parts[1],re.I):
+  return parts[0],1,':'.join(parts[1:]).strip()
+ return None
 
 @app.post('/api/import/netflix')
 def import_netflix(payload:NetflixCSV):
