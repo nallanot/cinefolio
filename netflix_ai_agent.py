@@ -3,6 +3,7 @@ import json
 import os
 import urllib.request
 import urllib.error
+import socket
 
 
 def suggest_match(title, candidates, episodes):
@@ -16,7 +17,7 @@ def suggest_match(title, candidates, episodes):
         "fournis dans episodes. Si aucune correspondance fiable, kind et tmdb_id sont null. "
         "Ne devine pas. Explique brièvement en français."
     )
-    model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite").strip()
+    model = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash").strip()
     body = {
         "systemInstruction": {"parts": [{"text": instructions}]},
         "contents": [{"role": "user", "parts": [{"text": json.dumps(
@@ -31,8 +32,10 @@ def suggest_match(title, candidates, episodes):
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=90) as response:
+        with urllib.request.urlopen(req, timeout=30) as response:
             answer = json.load(response)
+    except (TimeoutError, socket.timeout) as exc:
+        raise RuntimeError("Gemini : délai de réponse dépassé (30 s)") from exc
     except urllib.error.HTTPError as exc:
         detail = ""
         try:
