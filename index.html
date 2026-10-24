@@ -67,28 +67,37 @@ async function autoResolveFailed(){
  }catch(e){status.textContent=e.message}finally{button.disabled=false}
 }
 
+function netflixMovieCard(a,id,ambiguous=false){
+ const mid=Number(a.tmdb_id);
+ return '<div class="panel" style="display:flex;flex-direction:column;gap:10px;min-width:0">'+
+ (a.poster?'<img loading="lazy" alt="Affiche de '+esc(a.title||'film')+'" style="width:100%;max-width:190px;aspect-ratio:2/3;object-fit:cover;border-radius:8px;align-self:center" src="https://image.tmdb.org/t/p/w342'+encodeURIComponent(a.poster)+'">':'<div class="muted">Affiche indisponible</div>')+
+ '<strong>'+esc(a.title||'Titre inconnu')+'</strong><small>'+esc(a.year||'Année inconnue')+' · TMDB #'+mid+'</small>'+
+ (a.original_title&&a.original_title!==a.title?'<small>Titre original : '+esc(a.original_title)+'</small>':'')+
+ (a.directors?.length?'<small>Réalisation : '+esc(a.directors.join(', '))+'</small>':'')+
+ (a.runtime?'<small>Durée : '+a.runtime+' min</small>':'')+
+ (a.genres?.length?'<small>Genres : '+esc(a.genres.join(', '))+'</small>':'')+
+ (a.rating!=null?'<small>Note TMDB : '+Number(a.rating).toFixed(1)+'/10</small>':'')+
+ '<p style="flex:1">'+esc(a.overview||'Synopsis indisponible')+'</p>'+
+ '<a href="https://www.themoviedb.org/movie/'+mid+'" target="_blank" rel="noopener noreferrer">Voir sur TMDB</a>'+
+ (ambiguous?'<button class="primary" data-aimovie="'+id+'" data-tmdb="'+mid+'">Choisir ce film</button>':'<button class="primary" data-aiconfirm="'+id+'">Confirmer ce film</button>')+'</div>';
+}
 async function loadAIProposals(){
  const target=$('#aiFailedProposals');if(!target)return;
  try{
   const rows=await api('/api/import/netflix/ai/suggestions');
+  await Promise.all(rows.filter(x=>x.suggestion?.kind==='movie'&&!x.suggestion.ambiguous&&Number(x.suggestion.tmdb_id)>0).map(async x=>{
+   try{x.suggestion.details=await api('/api/import/netflix/movie/'+Number(x.suggestion.tmdb_id)+'/details')}catch(e){console.warn('Détails TMDB indisponibles',e)}
+  }));
   target.innerHTML=rows.filter(x=>x.suggestion).map(x=>{
    const p=x.suggestion;
    if(p.ambiguous&&p.alternatives?.length){
     return '<div class="panel"><strong>'+esc(x.title)+'</strong><p class="muted">Plusieurs versions possibles : vérifie l’affiche, l’année et les détails avant de choisir.</p>'+
-      '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px">'+p.alternatives.map(a=>
-      '<div class="panel" style="display:flex;flex-direction:column;gap:10px">'+
-      (a.poster?'<img loading="lazy" alt="Affiche de '+esc(a.title||'film')+'" style="width:100%;max-width:190px;aspect-ratio:2/3;object-fit:cover;border-radius:8px;align-self:center" src="https://image.tmdb.org/t/p/w342'+encodeURIComponent(a.poster)+'">':'<div class="muted">Affiche indisponible</div>')+
-      '<strong>'+esc(a.title||'Titre inconnu')+'</strong>'+
-      '<small>'+esc(a.year||'Année inconnue')+' · TMDB #'+a.tmdb_id+'</small>'+
-      (a.original_title&&a.original_title!==a.title?'<small>Titre original : '+esc(a.original_title)+'</small>':'')+
-      (a.directors?.length?'<small>Réalisation : '+esc(a.directors.join(', '))+'</small>':'')+
-      (a.runtime?'<small>Durée : '+a.runtime+' min</small>':'')+
-      (a.genres?.length?'<small>Genres : '+esc(a.genres.join(', '))+'</small>':'')+
-      (a.rating!=null?'<small>Note TMDB : '+Number(a.rating).toFixed(1)+'/10</small>':'')+
-      '<p style="flex:1">'+esc(a.overview||'Synopsis indisponible')+'</p>'+
-      '<a href="https://www.themoviedb.org/movie/'+a.tmdb_id+'" target="_blank" rel="noopener noreferrer">Voir sur TMDB</a>'+
-      '<button class="primary" data-aimovie="'+x.id+'" data-tmdb="'+a.tmdb_id+'">Choisir ce film</button></div>').join('')+
+      '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px">'+p.alternatives.map(a=>netflixMovieCard(a,x.id,true)).join('')+
       '</div><button data-aireject="'+x.id+'">Rejeter la proposition</button></div>';
+   }
+   if(p.kind==='movie'&&Number(p.tmdb_id)>0){
+    const details=p.details||{tmdb_id:p.tmdb_id,title:p.title||x.title};
+    return '<div class="panel"><strong>'+esc(x.title)+'</strong><p class="muted">'+esc(p.reason||'Proposition à vérifier')+'</p><div style="max-width:390px">'+netflixMovieCard(details,x.id,false)+'</div><button data-aireject="'+x.id+'">Rejeter</button></div>';
    }
    return '<div class="search-item"><div class="info"><strong>'+esc(x.title)+'</strong><small>'+esc(p.kind)+' #'+p.tmdb_id+(p.kind==='tv'?' · S'+p.season+'E'+p.episode:'')+' · '+esc(p.confidence)+' · '+esc(p.reason)+'</small></div><button data-aireject="'+x.id+'">Rejeter</button><button class="primary" data-aiconfirm="'+x.id+'">Confirmer</button></div>';
   }).join('');
