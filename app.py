@@ -13,7 +13,7 @@ def conn():
 def init():
  os.makedirs('/data',exist_ok=True)
  with closing(conn()) as c:
-  c.executescript('CREATE TABLE IF NOT EXISTS library(kind TEXT NOT NULL, tmdb_id INTEGER NOT NULL, title TEXT NOT NULL, poster TEXT, status TEXT DEFAULT "watchlist", watched INTEGER DEFAULT 0, rating INTEGER, PRIMARY KEY(kind,tmdb_id)); CREATE TABLE IF NOT EXISTS episodes(tmdb_id INTEGER NOT NULL, season INTEGER NOT NULL, episode INTEGER NOT NULL, watched_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(tmdb_id,season,episode));');c.execute('CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,username TEXT UNIQUE,display_name TEXT,salt TEXT,password_hash TEXT)');c.execute('CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY,expires INTEGER)');c.execute('CREATE TABLE IF NOT EXISTS custom_providers(kind TEXT NOT NULL,tmdb_id INTEGER NOT NULL,name TEXT NOT NULL,provider_id INTEGER,logo_path TEXT,PRIMARY KEY(kind,tmdb_id,name))');c.commit()
+  c.executescript('CREATE TABLE IF NOT EXISTS library(kind TEXT NOT NULL, tmdb_id INTEGER NOT NULL, title TEXT NOT NULL, poster TEXT, status TEXT DEFAULT "watchlist", watched INTEGER DEFAULT 0, rating INTEGER, PRIMARY KEY(kind,tmdb_id)); CREATE TABLE IF NOT EXISTS episodes(tmdb_id INTEGER NOT NULL, season INTEGER NOT NULL, episode INTEGER NOT NULL, watched_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(tmdb_id,season,episode));');c.execute('CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,username TEXT UNIQUE,display_name TEXT,salt TEXT,password_hash TEXT)');c.execute('CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY,expires INTEGER)');c.execute('CREATE TABLE IF NOT EXISTS netflix_unmatched(id INTEGER PRIMARY KEY, title TEXT NOT NULL, viewed_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT "pending", resolved_kind TEXT, resolved_tmdb_id INTEGER, resolved_season INTEGER, resolved_episode INTEGER, UNIQUE(title,viewed_at))');c.execute('CREATE TABLE IF NOT EXISTS custom_providers(kind TEXT NOT NULL,tmdb_id INTEGER NOT NULL,name TEXT NOT NULL,provider_id INTEGER,logo_path TEXT,PRIMARY KEY(kind,tmdb_id,name))');c.commit()
 
 class Credentials(BaseModel):
  username:str
@@ -347,7 +347,7 @@ def import_netflix(payload:NetflixCSV):
  by_title={norm(x['title']):x['tmdb_id'] for x in shows}
  movie_titles={norm(x['title']):x['tmdb_id'] for x in movies}
  cache={}; discovered={}; new_shows={}; new_movies={}
- proposed={}; unmatched=[]; movies_found=set(); invalid=0
+ proposed={}; unmatched=[]; unmatched_rows=[]; movies_found=set(); invalid=0
  def lookup(kind,title):
   key=(kind,norm(title))
   if key not in discovered:
@@ -385,7 +385,10 @@ def import_netflix(payload:NetflixCSV):
     if film is None and info:
      film=info['id'];new_movies[film]=(info.get('title') or title,info.get('poster_path'))
     if film is not None:movies_found.add(film)
-    elif len(unmatched)<30:unmatched.append(title)
+    else:
+    if len(unmatched)<30:unmatched.append(title)
+    unmatched_rows.append((title,when))
+    unmatched_rows.append((title,when))
     continue
    if season is None:
     key=(tmdb_id,'seasons')
@@ -413,6 +416,7 @@ def import_netflix(payload:NetflixCSV):
     if scores and scores[0][0]>=0.94 and (len(scores)==1 or scores[0][0]-scores[1][0]>=0.10):matches=[(scores[0][1],scores[0][2])]
    if len(matches)!=1:
     if len(unmatched)<30:unmatched.append(title)
+    unmatched_rows.append((title,when))
     continue
    sn,ep=matches[0];episode_key=(tmdb_id,sn,int(ep['episode_number']))
    if episode_key not in existing:proposed.setdefault(episode_key,when)
@@ -427,6 +431,7 @@ def import_netflix(payload:NetflixCSV):
  result={'total_rows':len(rows),'episodes_to_import':len(proposed),'movies_to_mark_watched':len(movies_found),'new_series':len(new_shows),'new_movies':len(new_movies),'already_watched_not_overwritten':len(existing.intersection(proposed)),'unmatched_examples':unmatched,'invalid_rows':invalid,'note':'Recherche des titres TMDB, numéros explicites et correspondances prudentes. Les ambiguïtés sont ignorées.'}
  if not payload.confirm:return result
  with closing(conn()) as c:
+  for title,when in unmatched_rows:c.execute('INSERT OR IGNORE INTO netflix_unmatched(title,viewed_at) VALUES(?,?)',(title,when))
   for tmdb_id,(title,poster) in new_shows.items():c.execute('INSERT OR IGNORE INTO library(kind,tmdb_id,title,poster) VALUES(?,?,?,?)',('tv',tmdb_id,title,poster))
   for tmdb_id,(title,poster) in new_movies.items():c.execute('INSERT OR IGNORE INTO library(kind,tmdb_id,title,poster) VALUES(?,?,?,?)',('movie',tmdb_id,title,poster))
   for (tmdb_id,season,episode),when in proposed.items():
@@ -434,3 +439,38 @@ def import_netflix(payload:NetflixCSV):
   for tmdb_id in movies_found:c.execute("UPDATE library SET watched=1 WHERE kind='movie' AND tmdb_id=?",(tmdb_id,))
   c.commit()
  return {**result,'imported':True}
+
+class NetflixResolve(BaseModel):
+ kind:str
+ tmdb_id:int
+ season:int|None=None
+ episode:int|None=None
+
+@app.get('/api/import/netflix/unmatched')
+def netflix_unmatched(status:str='pending'):
+ if status not in ('pending','resolved'):raise HTTPException(400,'Statut invalide')
+ with closing(conn()) as c:return [dict(x) for x in c.execute('SELECT * FROM netflix_unmatched WHERE status=? ORDER BY viewed_at DESC,id DESC LIMIT 3000',(status,))]
+
+@app.post('/api/import/netflix/unmatched/{row_id}/resolve')
+def resolve_netflix(row_id:int,payload:NetflixResolve):
+ if payload.kind not in ('tv','movie'):raise HTTPException(400,'Type invalide')
+ if payload.tmdb_id<=0:raise HTTPException(400,'Identifiant TMDB invalide')
+ if payload.kind=='tv' and (payload.season is None or payload.episode is None or payload.season<0 or payload.episode<=0):
+  raise HTTPException(400,'Saison et épisode requis')
+ details=tmdb(f'{payload.kind}/{payload.tmdb_id}')
+ if payload.kind=='tv':
+  episodes=tmdb(f'tv/{payload.tmdb_id}/season/{payload.season}').get('episodes',[])
+  if not any(x.get('episode_number')==payload.episode for x in episodes):raise HTTPException(400,'Épisode absent de TMDB')
+ title=details.get('name') or details.get('title')
+ if not title:raise HTTPException(400,'Titre TMDB invalide')
+ with closing(conn()) as c:
+  c.execute('BEGIN IMMEDIATE')
+  row=c.execute('SELECT * FROM netflix_unmatched WHERE id=? AND status=?',(row_id,'pending')).fetchone()
+  if not row:raise HTTPException(404,'Élément introuvable ou déjà résolu')
+  c.execute('INSERT OR IGNORE INTO library(kind,tmdb_id,title,poster) VALUES(?,?,?,?)',(payload.kind,payload.tmdb_id,title,details.get('poster_path')))
+  if payload.kind=='tv':
+   c.execute('INSERT OR IGNORE INTO episodes(tmdb_id,season,episode,watched_at) VALUES(?,?,?,?)',(payload.tmdb_id,payload.season,payload.episode,row['viewed_at']))
+  else:c.execute('UPDATE library SET watched=1 WHERE kind=? AND tmdb_id=?',('movie',payload.tmdb_id))
+  c.execute('UPDATE netflix_unmatched SET status=?,resolved_kind=?,resolved_tmdb_id=?,resolved_season=?,resolved_episode=? WHERE id=?',('resolved',payload.kind,payload.tmdb_id,payload.season,payload.episode,row_id))
+  c.commit()
+ return {'ok':True}
