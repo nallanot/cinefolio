@@ -4,8 +4,8 @@ services:
     restart: unless-stopped
     environment:
       TMDB_API_KEY: ${TMDB_API_KEY:-}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash-lite}
     networks:
       - traefik
     volumes:
