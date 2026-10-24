@@ -587,17 +587,63 @@ def netflix_normalize(value):
  return re.sub(r'[^a-z0-9]+',' ',''.join(c for c in value if not unicodedata.combining(c))).strip()
 
 def netflix_reanalyse_series(series_title):
- # No automatic import. Only unambiguous TMDB title matches are proposed.
+ """Compare all pending episodes of one confirmed series in a single TMDB pass."""
  with closing(conn()) as c:
+  series=c.execute('SELECT tmdb_id FROM netflix_series_memory WHERE series_title=?',(series_title,)).fetchone()
   rows=c.execute("SELECT id,title FROM netflix_unmatched WHERE status='pending'").fetchall()
- for row in rows:
-  parsed=netflix_episode_title(row['title'])
-  if not parsed or netflix_normalize(parsed[0])!=netflix_normalize(series_title):continue
-  proposal=netflix_learned_suggestion(row['title'])
-  if proposal:
-   with closing(conn()) as c:
-    c.execute('INSERT OR REPLACE INTO netflix_ai_suggestions(row_id,proposal_json) VALUES(?,?)',(row['id'],json.dumps(proposal)))
-    c.commit()
+ if not series:return {'series':series_title,'checked':0,'suggested':0}
+ rows=[row for row in rows if (parsed:=netflix_episode_title(row['title'])) and netflix_normalize(parsed[0])==netflix_normalize(series_title)]
+ mid=series['tmdb_id'];lookup={}
+ try:
+  seasons=[x['season_number'] for x in tmdb('tv/'+str(mid)).get('seasons',[]) if x.get('season_number',0)>0][:20]
+  for sn in seasons:
+   for language in ('fr-FR','fr-CA','es-ES','en-US'):
+    try:
+     for ep in tmdb('tv/'+str(mid)+'/season/'+str(sn),{'language':language}).get('episodes',[]):
+      name=netflix_normalize(ep.get('name',''))
+      if name and name not in ('episode','episode '+str(ep['episode_number'])):
+       lookup.setdefault(name,set()).add((sn,ep['episode_number']))
+    except Exception:pass
+ except Exception:pass
+ proposed=0
+ with closing(conn()) as c:
+  for row in rows:
+   parsed=netflix_episode_title(row['title'])
+   name=netflix_normalize(parsed[2])
+   matches=lookup.get(name,set())
+   if parsed[1] is not None:matches={x for x in matches if x[0]==parsed[1]}
+   if len(matches)!=1:continue
+   sn,ep=next(iter(matches))
+   proposal={'kind':'tv','tmdb_id':mid,'season':sn,'episode':ep,'confidence':0.99,'reason':'Titre exact trouvé dans les épisodes TMDB multilingues de la série confirmée. Vérification manuelle requise.','source':'tmdb-grouped'}
+   c.execute('INSERT OR REPLACE INTO netflix_ai_suggestions(row_id,proposal_json) VALUES(?,?)',(row['id'],json.dumps(proposal)))
+   proposed+=1
+  c.commit()
+ return {'series':series_title,'checked':len(rows),'suggested':proposed}
+
+@app.post('/api/import/netflix/series/reanalyse')
+def netflix_reanalyse_confirmed_series():
+ with closing(conn()) as c:
+  series=[row['series_title'] for row in c.execute('SELECT series_title FROM netflix_series_memory').fetchall()]
+ if not series:return {'series':0,'checked':0,'suggested':0}
+ with _ai_jobs_lock:
+  if any(j['status'] in ('queued','running') for j in _ai_jobs.values()):raise HTTPException(409,'Une analyse est déjà en cours')
+  job_id=secrets.token_hex(8)
+  _ai_jobs[job_id]={'id':job_id,'status':'queued','total':len(series),'processed':0,'matched':0,'errors':[]}
+ def worker():
+  with _ai_jobs_lock:_ai_jobs[job_id]['status']='running'
+  for name in series:
+   with _ai_jobs_lock:
+    if _ai_jobs[job_id]['status']=='cancelled':break
+   try:
+    result=netflix_reanalyse_series(name)
+    with _ai_jobs_lock:_ai_jobs[job_id]['matched']+=result['suggested']
+   except Exception as exc:
+    with _ai_jobs_lock:_ai_jobs[job_id]['errors'].append({'series':name,'message':str(exc)[:200]})
+   with _ai_jobs_lock:_ai_jobs[job_id]['processed']+=1
+  with _ai_jobs_lock:
+   if _ai_jobs[job_id]['status']=='running':_ai_jobs[job_id]['status']='completed'
+ threading.Thread(target=worker,daemon=True).start()
+ return {'id':job_id,'series':len(series)}
 
 @app.post('/api/import/netflix/ai/suggest')
 def netflix_ai_suggest(payload:NetflixAIScan):
