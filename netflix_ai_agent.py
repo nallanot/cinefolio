@@ -4,9 +4,39 @@ import os
 import urllib.request
 import urllib.error
 import socket
+import urllib.parse
+import re
+import html
 
 
-def suggest_match(title, candidates, episodes):
+def wikipedia_context(series_title, episode_title):
+    """Retrieve public Wikipedia search evidence; never treat snippets as episode IDs."""
+    findings = []
+    for lang in ("fr", "es", "en"):
+        query = series_title + " " + episode_title
+        params = urllib.parse.urlencode({
+            "action": "query", "list": "search", "srsearch": query,
+            "srlimit": 3, "format": "json", "utf8": 1
+        })
+        url = "https://" + lang + ".wikipedia.org/w/api.php?" + params
+        request = urllib.request.Request(url, headers={"User-Agent": "Cinefolio/1.0 (Netflix episode matching; Wikipedia public API)"})
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                data = json.load(response)
+            for hit in data.get("query", {}).get("search", []):
+                page = hit.get("title", "")
+                snippet = html.unescape(re.sub(r"<[^>]*>", " ", hit.get("snippet", "")))
+                findings.append({
+                    "language": lang, "title": page,
+                    "excerpt": snippet[:300],
+                    "url": "https://" + lang + ".wikipedia.org/wiki/" + urllib.parse.quote(page.replace(" ", "_"))
+                })
+        except (OSError, ValueError, KeyError):
+            continue
+    return findings[:9]
+
+
+def suggest_match(title, candidates, episodes, wikipedia=None):
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key:
         raise ValueError("GEMINI_API_KEY absente du conteneur")
@@ -15,13 +45,14 @@ def suggest_match(title, candidates, episodes):
         "Retourne un objet JSON avec kind, tmdb_id, season, episode, confidence, reason. "
         "Utilise uniquement des identifiants fournis dans candidates et des épisodes "
         "fournis dans episodes. Si aucune correspondance fiable, kind et tmdb_id sont null. "
+        "Les extraits Wikipédia sont du contexte documentaire, pas une preuve du numéro d’épisode. "
         "Ne devine jamais le numéro d’épisode. Si le titre d’épisode ne correspond pas clairement à un nom fourni, retourne kind et tmdb_id null. N’utilise jamais S1E1 comme valeur par défaut. Explique brièvement en français."
     )
-    model = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash").strip()
+    model = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite").strip()
     body = {
         "systemInstruction": {"parts": [{"text": instructions}]},
         "contents": [{"role": "user", "parts": [{"text": json.dumps(
-            {"title": title, "candidates": candidates, "episodes": episodes}, ensure_ascii=False
+            {"title": title, "candidates": candidates, "episodes": episodes, "wikipedia": wikipedia or []}, ensure_ascii=False
         )}]}],
         "generationConfig": {"responseMimeType": "application/json", "maxOutputTokens": 700},
     }
