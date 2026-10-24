@@ -14,7 +14,7 @@ def conn():
 def init():
  os.makedirs('/data',exist_ok=True)
  with closing(conn()) as c:
-  c.executescript('CREATE TABLE IF NOT EXISTS library(kind TEXT NOT NULL, tmdb_id INTEGER NOT NULL, title TEXT NOT NULL, poster TEXT, status TEXT DEFAULT "watchlist", watched INTEGER DEFAULT 0, rating INTEGER, PRIMARY KEY(kind,tmdb_id)); CREATE TABLE IF NOT EXISTS episodes(tmdb_id INTEGER NOT NULL, season INTEGER NOT NULL, episode INTEGER NOT NULL, watched_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(tmdb_id,season,episode));');c.execute('CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,username TEXT UNIQUE,display_name TEXT,salt TEXT,password_hash TEXT)');c.execute('CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY,expires INTEGER)');c.execute('CREATE TABLE IF NOT EXISTS netflix_unmatched(id INTEGER PRIMARY KEY, title TEXT NOT NULL, viewed_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT "pending", resolved_kind TEXT, resolved_tmdb_id INTEGER, resolved_season INTEGER, resolved_episode INTEGER, UNIQUE(title,viewed_at))');c.execute('CREATE TABLE IF NOT EXISTS netflix_ai_suggestions(row_id INTEGER PRIMARY KEY,proposal_json TEXT NOT NULL)');c.execute('CREATE TABLE IF NOT EXISTS custom_providers(kind TEXT NOT NULL,tmdb_id INTEGER NOT NULL,name TEXT NOT NULL,provider_id INTEGER,logo_path TEXT,PRIMARY KEY(kind,tmdb_id,name))');c.commit()
+  c.executescript('CREATE TABLE IF NOT EXISTS library(kind TEXT NOT NULL, tmdb_id INTEGER NOT NULL, title TEXT NOT NULL, poster TEXT, status TEXT DEFAULT "watchlist", watched INTEGER DEFAULT 0, rating INTEGER, PRIMARY KEY(kind,tmdb_id)); CREATE TABLE IF NOT EXISTS episodes(tmdb_id INTEGER NOT NULL, season INTEGER NOT NULL, episode INTEGER NOT NULL, watched_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(tmdb_id,season,episode));');c.execute('CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,username TEXT UNIQUE,display_name TEXT,salt TEXT,password_hash TEXT)');c.execute('CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY,expires INTEGER)');c.execute('CREATE TABLE IF NOT EXISTS netflix_unmatched(id INTEGER PRIMARY KEY, title TEXT NOT NULL, viewed_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT "pending", resolved_kind TEXT, resolved_tmdb_id INTEGER, resolved_season INTEGER, resolved_episode INTEGER, UNIQUE(title,viewed_at))');c.execute('CREATE TABLE IF NOT EXISTS netflix_ai_suggestions(row_id INTEGER PRIMARY KEY,proposal_json TEXT NOT NULL)');c.execute('CREATE TABLE IF NOT EXISTS netflix_series_memory(series_title TEXT PRIMARY KEY COLLATE NOCASE,tmdb_id INTEGER NOT NULL,confirmed_at TEXT DEFAULT CURRENT_TIMESTAMP)');c.execute('CREATE TABLE IF NOT EXISTS netflix_episode_memory(netflix_title TEXT PRIMARY KEY COLLATE NOCASE,tmdb_id INTEGER NOT NULL,season INTEGER NOT NULL,episode INTEGER NOT NULL,confirmed_at TEXT DEFAULT CURRENT_TIMESTAMP)');c.execute('CREATE TABLE IF NOT EXISTS custom_providers(kind TEXT NOT NULL,tmdb_id INTEGER NOT NULL,name TEXT NOT NULL,provider_id INTEGER,logo_path TEXT,PRIMARY KEY(kind,tmdb_id,name))');c.commit()
 
 class Credentials(BaseModel):
  username:str
@@ -554,13 +554,63 @@ def auto_resolve_netflix(payload:NetflixAutoResolve):
 class NetflixAIScan(BaseModel):
  row_id:int
 
+def netflix_learned_suggestion(title):
+ parsed=netflix_episode_title(title)
+ if not parsed:return None
+ with closing(conn()) as c:
+  exact=c.execute('SELECT tmdb_id,season,episode FROM netflix_episode_memory WHERE netflix_title=?',(title,)).fetchone()
+  if exact:
+   return {'kind':'tv','tmdb_id':exact['tmdb_id'],'season':exact['season'],'episode':exact['episode'],'confidence':1.0,'reason':'Correspondance déjà confirmée dans la mémoire Cinéfolio'}
+  series=c.execute('SELECT tmdb_id FROM netflix_series_memory WHERE series_title=?',(parsed[0],)).fetchone()
+ if not series:return None
+ mid=series['tmdb_id']
+ target=netflix_normalize(parsed[2])
+ if not target:return None
+ try:
+  seasons=[parsed[1]] if parsed[1] is not None else [x['season_number'] for x in tmdb('tv/'+str(mid)).get('seasons',[]) if x.get('season_number',0)>0][:12]
+  matches=set()
+  for sn in seasons:
+   for language in ('fr-FR','fr-CA','es-ES','en-US'):
+    try:
+     for ep in tmdb('tv/'+str(mid)+'/season/'+str(sn),{'language':language}).get('episodes',[]):
+      if netflix_normalize(ep.get('name',''))==target:matches.add((sn,ep['episode_number']))
+    except Exception:pass
+  if len(matches)==1:
+   sn,ep=next(iter(matches))
+   return {'kind':'tv','tmdb_id':mid,'season':sn,'episode':ep,'confidence':0.99,'reason':'Titre exact retrouvé dans TMDB grâce à la série confirmée (validation requise)'}
+ except Exception:pass
+ return None
+
+def netflix_normalize(value):
+ import unicodedata,re
+ value=unicodedata.normalize('NFKD',str(value).casefold())
+ return re.sub(r'[^a-z0-9]+',' ',''.join(c for c in value if not unicodedata.combining(c))).strip()
+
+def netflix_reanalyse_series(series_title):
+ # No automatic import. Only unambiguous TMDB title matches are proposed.
+ with closing(conn()) as c:
+  rows=c.execute("SELECT id,title FROM netflix_unmatched WHERE status='pending'").fetchall()
+ for row in rows:
+  parsed=netflix_episode_title(row['title'])
+  if not parsed or netflix_normalize(parsed[0])!=netflix_normalize(series_title):continue
+  proposal=netflix_learned_suggestion(row['title'])
+  if proposal:
+   with closing(conn()) as c:
+    c.execute('INSERT OR REPLACE INTO netflix_ai_suggestions(row_id,proposal_json) VALUES(?,?)',(row['id'],json.dumps(proposal)))
+    c.commit()
+
 @app.post('/api/import/netflix/ai/suggest')
 def netflix_ai_suggest(payload:NetflixAIScan):
- if not os.getenv('GEMINI_API_KEY'):raise HTTPException(503,'GEMINI_API_KEY manquante')
  with closing(conn()) as c:
   row=c.execute("SELECT title FROM netflix_unmatched WHERE id=? AND status='pending'",(payload.row_id,)).fetchone()
  if not row:raise HTTPException(404,'Visionnement introuvable')
  title=row['title'];parsed=netflix_episode_title(title);query=parsed[0] if parsed else title
+ learned=netflix_learned_suggestion(title)
+ if learned:
+  with closing(conn()) as c:
+   c.execute('INSERT OR REPLACE INTO netflix_ai_suggestions(row_id,proposal_json) VALUES(?,?)',(payload.row_id,json.dumps(learned)));c.commit()
+  return {'id':payload.row_id,'title':title,'suggestion':learned}
+ if not os.getenv('GEMINI_API_KEY'):raise HTTPException(503,'GEMINI_API_KEY manquante')
  candidates=[];episodes=[]
  for kind in ('tv','movie'):
   try:
@@ -699,6 +749,14 @@ def resolve_netflix(row_id:int,payload:NetflixResolve):
   if payload.kind=='tv':
    c.execute('INSERT OR IGNORE INTO episodes(tmdb_id,season,episode,watched_at) VALUES(?,?,?,?)',(payload.tmdb_id,payload.season,payload.episode,row['viewed_at']))
   else:c.execute('UPDATE library SET watched=1 WHERE kind=? AND tmdb_id=?',('movie',payload.tmdb_id))
+  if payload.kind=='tv':
+   parsed=netflix_episode_title(row['title'])
+   if parsed:
+    c.execute('INSERT OR REPLACE INTO netflix_series_memory(series_title,tmdb_id) VALUES(?,?)',(parsed[0],payload.tmdb_id))
+    c.execute('INSERT OR REPLACE INTO netflix_episode_memory(netflix_title,tmdb_id,season,episode) VALUES(?,?,?,?)',(row['title'],payload.tmdb_id,payload.season,payload.episode))
   c.execute('UPDATE netflix_unmatched SET status=?,resolved_kind=?,resolved_tmdb_id=?,resolved_season=?,resolved_episode=? WHERE id=?',('resolved',payload.kind,payload.tmdb_id,payload.season,payload.episode,row_id))
   c.commit()
+ if payload.kind=='tv':
+  parsed=netflix_episode_title(row['title'])
+  if parsed:threading.Thread(target=netflix_reanalyse_series,args=(parsed[0],),daemon=True).start()
  return {'ok':True}
