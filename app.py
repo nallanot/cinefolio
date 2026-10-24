@@ -1,6 +1,6 @@
 import os, sqlite3, urllib.request, urllib.parse, json, time, threading, secrets, hashlib, hmac
 from contextlib import closing
-from netflix_ai_agent import suggest_match
+from netflix_ai_agent import suggest_match, wikipedia_context
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
@@ -585,7 +585,9 @@ def netflix_ai_suggest(payload:NetflixAIScan):
       except Exception:pass
      episodes.extend(by_episode.values())
    except Exception:pass
- try:proposal=suggest_match(title,candidates,episodes[:500]) if candidates else None
+ try:
+  wiki=wikipedia_context(query,parsed[2]) if parsed and candidates else []
+  proposal=suggest_match(title,candidates,episodes[:500],wiki) if candidates else None
  except Exception as exc:raise HTTPException(502,'Recherche IA indisponible : '+str(exc)[:300])
  with closing(conn()) as c:
   c.execute('INSERT OR REPLACE INTO netflix_ai_suggestions(row_id,proposal_json) VALUES(?,?)',(payload.row_id,json.dumps(proposal)));c.commit()
