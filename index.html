@@ -85,7 +85,9 @@ async function analyzeFailedWithAI(){
    await new Promise(resolve=>setTimeout(resolve,2000));
    const progress=await api('/api/import/netflix/ai/batch/'+job.id);
    const current=$('#aiFailedStatus');if(current)current.textContent=progress.processed+'/'+progress.total+' analysés · '+progress.matched+' propositions · '+progress.errors.length+' erreurs';
-   finished=['completed','cancelled'].includes(progress.status);
+   if(current&&progress.errors.length){current.textContent+=' · '+progress.errors.slice(-3).map(e=>'#'+e.id+': '+e.message).join(' | ')}
+   if(current&&progress.reason)current.textContent+=' · '+progress.reason;
+   finished=['completed','cancelled','stopped'].includes(progress.status);
   }
   await loadAIProposals();
  }catch(e){if($('#aiFailedStatus'))$('#aiFailedStatus').textContent=e.message}
