@@ -550,6 +550,43 @@ def auto_resolve_netflix(payload:NetflixAutoResolve):
    c.commit()
  return {'processed':len(rows),'matched':len(suggestions),'unmatched':skipped,'suggestions':suggestions,'applied':payload.confirm}
 
+
+class NetflixAIScan(BaseModel):
+ row_id:int
+
+@app.post('/api/import/netflix/ai/suggest')
+def netflix_ai_suggest(payload:NetflixAIScan):
+ if not os.getenv('OPENAI_API_KEY'):raise HTTPException(503,'OPENAI_API_KEY manquante')
+ with closing(conn()) as c:
+  row=c.execute("SELECT title FROM netflix_unmatched WHERE id=? AND status='pending'",(payload.row_id,)).fetchone()
+ if not row:raise HTTPException(404,'Visionnement introuvable')
+ title=row['title'];parsed=netflix_episode_title(title);query=parsed[0] if parsed else title
+ candidates=[];episodes=[]
+ for kind in ('tv','movie'):
+  try:
+   for hit in tmdb('search/'+kind,{'query':query}).get('results',[])[:5]:
+    candidates.append({'kind':kind,'id':hit['id'],'title':hit.get('name') or hit.get('title'),'original':hit.get('original_name') or hit.get('original_title')})
+  except Exception:pass
+ if parsed:
+  for item in [x for x in candidates if x['kind']=='tv'][:2]:
+   try:
+    seasons=[parsed[1]] if parsed[1] is not None else [x['season_number'] for x in tmdb('tv/'+str(item['id'])).get('seasons',[]) if x.get('season_number',0)>0][:5]
+    for sn in seasons:
+     for ep in tmdb('tv/'+str(item['id'])+'/season/'+str(sn)).get('episodes',[])[:35]:
+      episodes.append({'id':item['id'],'season':sn,'episode':ep['episode_number'],'name':ep.get('name','')})
+   except Exception:pass
+ try:proposal=suggest_match(title,candidates,episodes[:500]) if candidates else None
+ except Exception as exc:raise HTTPException(502,'Recherche IA indisponible : '+type(exc).__name__)
+ with closing(conn()) as c:
+  c.execute('INSERT OR REPLACE INTO netflix_ai_suggestions(row_id,proposal_json) VALUES(?,?)',(payload.row_id,json.dumps(proposal)));c.commit()
+ return {'id':payload.row_id,'title':title,'suggestion':proposal}
+
+@app.get('/api/import/netflix/ai/suggestions')
+def netflix_ai_list():
+ with closing(conn()) as c:
+  rows=c.execute("SELECT s.row_id,u.title,s.proposal_json FROM netflix_ai_suggestions s JOIN netflix_unmatched u ON u.id=s.row_id WHERE u.status='pending' ORDER BY s.row_id DESC").fetchall()
+ return [{'id':x['row_id'],'title':x['title'],'suggestion':json.loads(x['proposal_json'])} for x in rows]
+
 class NetflixResolve(BaseModel):
  kind:str
  tmdb_id:int
