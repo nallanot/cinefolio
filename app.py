@@ -568,12 +568,22 @@ def netflix_ai_suggest(payload:NetflixAIScan):
     candidates.append({'kind':kind,'id':hit['id'],'title':hit.get('name') or hit.get('title'),'original':hit.get('original_name') or hit.get('original_title')})
   except Exception:pass
  if parsed:
+  # Fetch localized episode names; Netflix's French episode titles may differ from TMDB fr-CA.
   for item in [x for x in candidates if x['kind']=='tv'][:2]:
    try:
     seasons=[parsed[1]] if parsed[1] is not None else [x['season_number'] for x in tmdb('tv/'+str(item['id'])).get('seasons',[]) if x.get('season_number',0)>0][:5]
     for sn in seasons:
-     for ep in tmdb('tv/'+str(item['id'])+'/season/'+str(sn)).get('episodes',[])[:35]:
-      episodes.append({'id':item['id'],'season':sn,'episode':ep['episode_number'],'name':ep.get('name','')})
+     by_episode={}
+     for language in ('fr-FR','fr-CA','es-ES','en-US'):
+      try:
+       for ep in tmdb('tv/'+str(item['id'])+'/season/'+str(sn),{'language':language}).get('episodes',[])[:35]:
+        number=ep['episode_number']
+        key=(item['id'],sn,number)
+        if key not in by_episode:by_episode[key]={'id':item['id'],'season':sn,'episode':number,'names':[]}
+        name=(ep.get('name') or '').strip()
+        if name and name not in by_episode[key]['names']:by_episode[key]['names'].append(name)
+      except Exception:pass
+     episodes.extend(by_episode.values())
    except Exception:pass
  try:proposal=suggest_match(title,candidates,episodes[:500]) if candidates else None
  except Exception as exc:raise HTTPException(502,'Recherche IA indisponible : '+str(exc)[:300])
