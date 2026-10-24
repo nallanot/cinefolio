@@ -338,10 +338,21 @@ def import_netflix(payload:NetflixCSV):
   movies=[dict(x) for x in c.execute("SELECT tmdb_id,title FROM library WHERE kind='movie'")]
   existing={(x['tmdb_id'],x['season'],x['episode']) for x in c.execute('SELECT tmdb_id,season,episode FROM episodes')}
  norm=lambda t:re.sub(r'[^\w]+',' ',t.casefold()).strip()
- by_title={norm(x['title']):x['tmdb_id'] for x in shows}\n  existing_show_ids={x['tmdb_id'] for x in shows}\n  existing_movie_ids={x['tmdb_id'] for x in movies}
+ by_title={norm(x['title']):x['tmdb_id'] for x in shows}
  movie_titles={norm(x['title']):x['tmdb_id'] for x in movies}
- cache={}
+ cache={}; discovered={}; new_shows={}; new_movies={}
  proposed={}; unmatched=[]; movies_found=set(); invalid=0
+ def lookup(kind,title):
+  key=(kind,norm(title))
+  if key not in discovered:
+   try:
+    hits=tmdb('search/'+kind,{'query':title}).get('results',[])
+    field='name' if kind=='tv' else 'title'
+    original='original_name' if kind=='tv' else 'original_title'
+    matches=[x for x in hits if norm(x.get(field,'') or '')==norm(title) or norm(x.get(original,'') or '')==norm(title)]
+    discovered[key]=matches[0] if len(matches)==1 else None
+   except Exception:discovered[key]=None
+  return discovered[key]
  for row in rows:
   title=(row.get(title_col) or '').strip();when=netflix_date(row.get(date_col) or '')
   if not title or not when:invalid+=1;continue
@@ -350,26 +361,44 @@ def import_netflix(payload:NetflixCSV):
    series,season,episode_name=parsed
    tmdb_id=by_title.get(norm(series))
    if tmdb_id is None:
+    info=lookup('tv',series)
+    if info:
+     tmdb_id=info['id'];new_shows[tmdb_id]=(info.get('name') or series,info.get('poster_path'))
+   if tmdb_id is None:
     if len(unmatched)<30:unmatched.append(title)
     continue
-   key=(tmdb_id,season)
-   if key not in cache:
-    try:cache[key]=tmdb(f'tv/{tmdb_id}/season/{season}').get('episodes',[])
-    except Exception:cache[key]=[]
-   exact=[e for e in cache[key] if norm(e.get('name') or '')==norm(episode_name)]
-   # Never guess episode identity when titles do not match.
-   if len(exact)!=1:
+   if season is None:
+    key=(tmdb_id,'seasons')
+    if key not in cache:
+     try:cache[key]=[x['season_number'] for x in tmdb(f'tv/{tmdb_id}').get('seasons',[]) if x['season_number']>0]
+     except Exception:cache[key]=[]
+    seasons=cache[key]
+   else:seasons=[season]
+   matches=[]
+   for sn in seasons:
+    key=(tmdb_id,sn)
+    if key not in cache:
+     try:cache[key]=tmdb(f'tv/{tmdb_id}/season/{sn}').get('episodes',[])
+     except Exception:cache[key]=[]
+    matches.extend((sn,e) for e in cache[key] if norm(e.get('name') or '')==norm(episode_name))
+   if len(matches)!=1:
     if len(unmatched)<30:unmatched.append(title)
     continue
-   ep=int(exact[0][1]['episode_number']);episode_key=(tmdb_id,season,ep)
+   sn,ep=matches[0];episode_key=(tmdb_id,sn,int(ep['episode_number']))
    if episode_key not in existing:proposed.setdefault(episode_key,when)
-  elif norm(title) in movie_titles:
-   movies_found.add(movie_titles[norm(title)])
-  elif len(unmatched)<30:unmatched.append(title)
+  else:
+   mid=movie_titles.get(norm(title))
+   if mid is None:
+    info=lookup('movie',title)
+    if info:
+     mid=info['id'];new_movies[mid]=(info.get('title') or title,info.get('poster_path'))
+   if mid is not None:movies_found.add(mid)
+   elif len(unmatched)<30:unmatched.append(title)
  result={'total_rows':len(rows),'episodes_to_import':len(proposed),'movies_to_mark_watched':len(movies_found),'new_series':len(new_shows),'new_movies':len(new_movies),'already_watched_not_overwritten':len(rows)-len(proposed)-len(movies_found)-invalid-len(unmatched),'unmatched_examples':unmatched,'invalid_rows':invalid,'note':'Correspondance exacte avec les séries déjà dans Cinéfolio. Les éléments non reconnus sont ignorés.'}
  if not payload.confirm:return result
  with closing(conn()) as c:
-  for tmdb_id,(title,poster) in new_shows.items():c.execute('INSERT OR IGNORE INTO library(kind,tmdb_id,title,poster) VALUES(?,?,?,?)',('tv',tmdb_id,title,poster))\n  for tmdb_id,(title,poster) in new_movies.items():c.execute('INSERT OR IGNORE INTO library(kind,tmdb_id,title,poster) VALUES(?,?,?,?)',('movie',tmdb_id,title,poster))\n  for (tmdb_id,season,episode),when in proposed.items():
+  for tmdb_id,(title,poster) in new_shows.items():c.execute('INSERT OR IGNORE INTO library(kind,tmdb_id,title,poster) VALUES(?,?,?,?)',('tv',tmdb_id,title,poster))\n  for tmdb_id,(title,poster) in new_movies.items():c.execute('INSERT OR IGNORE INTO library(kind,tmdb_id,title,poster) VALUES(?,?,?,?)',('movie',tmdb_id,title,poster))
+  for (tmdb_id,season,episode),when in proposed.items():
    c.execute('INSERT OR IGNORE INTO episodes(tmdb_id,season,episode,watched_at) VALUES(?,?,?,?)',(tmdb_id,season,episode,when))
   for tmdb_id in movies_found:c.execute("UPDATE library SET watched=1 WHERE kind='movie' AND tmdb_id=?",(tmdb_id,))
   c.commit()
