@@ -645,8 +645,24 @@ def netflix_reanalyse_confirmed_series():
  threading.Thread(target=worker,daemon=True).start()
  return {'id':job_id,'series':len(series)}
 
+def netflix_movie_details(mid,hit=None):
+ """Enrich a proposed film with public TMDB metadata; keep failure non-fatal."""
+ hit=hit or {}
+ try:details=tmdb('movie/'+str(mid),{'language':'fr-FR','append_to_response':'credits'})
+ except Exception:details=hit
+ directors=[x.get('name') for x in details.get('credits',{}).get('crew',[]) if x.get('job')=='Director']
+ return {'kind':'movie','tmdb_id':mid,'title':details.get('title') or hit.get('title') or hit.get('original_title'),
+  'original_title':details.get('original_title') or hit.get('original_title'),
+  'year':(details.get('release_date') or hit.get('release_date') or '')[:4],
+  'release_date':details.get('release_date') or hit.get('release_date') or '',
+  'poster':details.get('poster_path') or hit.get('poster_path'),
+  'overview':details.get('overview') or hit.get('overview') or '',
+  'runtime':details.get('runtime'),'genres':[g.get('name') for g in details.get('genres',[])],
+  'directors':directors,'rating':details.get('vote_average'),
+  'tmdb_url':'https://www.themoviedb.org/movie/'+str(mid)}
+
 def netflix_movie_alternatives(title):
- """Exact-title movie homonyms; never select a release year from a title alone."""
+ """Find exact-title homonyms across localized TMDB results."""
  query=title.strip()
  if ':' in query:return []
  choices={}
@@ -655,10 +671,10 @@ def netflix_movie_alternatives(title):
    for hit in tmdb('search/movie',{'query':query,'language':language}).get('results',[])[:20]:
     names=[hit.get('title',''),hit.get('original_title','')]
     if not any(netflix_normalize(n)==netflix_normalize(query) for n in names):continue
-    mid=hit['id']
-    choices[mid]={'kind':'movie','tmdb_id':mid,'title':hit.get('title') or hit.get('original_title'),'original_title':hit.get('original_title'),'year':(hit.get('release_date') or '')[:4],'poster':hit.get('poster_path'),'overview':(hit.get('overview') or '')[:450]}
+    choices[hit['id']]=hit
   except Exception:pass
- return sorted(choices.values(),key=lambda x:(x['year'],x['tmdb_id']),reverse=True)[:8]
+ hits=sorted(choices.values(),key=lambda h:(h.get('release_date') or '',h['id']),reverse=True)[:8]
+ return [netflix_movie_details(h['id'],h) for h in hits]
 
 @app.post('/api/import/netflix/ai/suggest')
 def netflix_ai_suggest(payload:NetflixAIScan):
