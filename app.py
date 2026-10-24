@@ -587,6 +587,55 @@ def netflix_ai_list():
   rows=c.execute("SELECT s.row_id,u.title,s.proposal_json FROM netflix_ai_suggestions s JOIN netflix_unmatched u ON u.id=s.row_id WHERE u.status='pending' ORDER BY s.row_id DESC").fetchall()
  return [{'id':x['row_id'],'title':x['title'],'suggestion':json.loads(x['proposal_json'])} for x in rows]
 
+
+_ai_jobs={}
+_ai_jobs_lock=threading.Lock()
+
+def _ai_batch_worker(job_id,limit):
+ with _ai_jobs_lock:_ai_jobs[job_id]['status']='running'
+ with closing(conn()) as c:
+  rows=c.execute("SELECT u.id FROM netflix_unmatched u LEFT JOIN netflix_ai_suggestions s ON s.row_id=u.id WHERE u.status='pending' AND s.row_id IS NULL ORDER BY u.id LIMIT ?",(limit,)).fetchall()
+ with _ai_jobs_lock:_ai_jobs[job_id]['total']=len(rows)
+ for row in rows:
+  with _ai_jobs_lock:
+   if _ai_jobs[job_id]['status']=='cancelled':break
+  try:
+   result=netflix_ai_suggest(NetflixAIScan(row_id=row['id']))
+   with _ai_jobs_lock:
+    if result['suggestion']:_ai_jobs[job_id]['matched']+=1
+  except Exception as exc:
+   with _ai_jobs_lock:_ai_jobs[job_id]['errors'].append({'id':row['id'],'message':str(getattr(exc,'detail',type(exc).__name__))[:180]})
+  with _ai_jobs_lock:_ai_jobs[job_id]['processed']+=1
+ with _ai_jobs_lock:
+  if _ai_jobs[job_id]['status']!='cancelled':_ai_jobs[job_id]['status']='completed'
+
+class NetflixAIBatch(BaseModel):
+ limit:int=20
+
+@app.post('/api/import/netflix/ai/batch')
+def netflix_ai_batch(payload:NetflixAIBatch):
+ if not os.getenv('OPENAI_API_KEY'):raise HTTPException(503,'OPENAI_API_KEY manquante')
+ limit=max(1,min(payload.limit,100))
+ with _ai_jobs_lock:
+  if any(j['status'] in ('queued','running') for j in _ai_jobs.values()):raise HTTPException(409,'Une analyse IA est déjà en cours')
+  job_id=secrets.token_hex(8)
+  _ai_jobs[job_id]={'id':job_id,'status':'queued','total':0,'processed':0,'matched':0,'errors':[]}
+ threading.Thread(target=_ai_batch_worker,args=(job_id,limit),daemon=True).start()
+ return {'id':job_id}
+
+@app.get('/api/import/netflix/ai/batch/{job_id}')
+def netflix_ai_batch_status(job_id:str):
+ with _ai_jobs_lock:
+  if job_id not in _ai_jobs:raise HTTPException(404,'Analyse introuvable (redémarrage du serveur possible)')
+  return dict(_ai_jobs[job_id])
+
+@app.post('/api/import/netflix/ai/batch/{job_id}/cancel')
+def netflix_ai_batch_cancel(job_id:str):
+ with _ai_jobs_lock:
+  if job_id not in _ai_jobs:raise HTTPException(404,'Analyse introuvable')
+  if _ai_jobs[job_id]['status'] in ('queued','running'):_ai_jobs[job_id]['status']='cancelled'
+  return dict(_ai_jobs[job_id])
+
 class NetflixResolve(BaseModel):
  kind:str
  tmdb_id:int
