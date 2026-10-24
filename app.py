@@ -1,5 +1,6 @@
 import os, sqlite3, urllib.request, urllib.parse, json, time, threading, secrets, hashlib, hmac
 from contextlib import closing
+from netflix_ai_agent import suggest_match
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
@@ -13,7 +14,7 @@ def conn():
 def init():
  os.makedirs('/data',exist_ok=True)
  with closing(conn()) as c:
-  c.executescript('CREATE TABLE IF NOT EXISTS library(kind TEXT NOT NULL, tmdb_id INTEGER NOT NULL, title TEXT NOT NULL, poster TEXT, status TEXT DEFAULT "watchlist", watched INTEGER DEFAULT 0, rating INTEGER, PRIMARY KEY(kind,tmdb_id)); CREATE TABLE IF NOT EXISTS episodes(tmdb_id INTEGER NOT NULL, season INTEGER NOT NULL, episode INTEGER NOT NULL, watched_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(tmdb_id,season,episode));');c.execute('CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,username TEXT UNIQUE,display_name TEXT,salt TEXT,password_hash TEXT)');c.execute('CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY,expires INTEGER)');c.execute('CREATE TABLE IF NOT EXISTS netflix_unmatched(id INTEGER PRIMARY KEY, title TEXT NOT NULL, viewed_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT "pending", resolved_kind TEXT, resolved_tmdb_id INTEGER, resolved_season INTEGER, resolved_episode INTEGER, UNIQUE(title,viewed_at))');c.execute('CREATE TABLE IF NOT EXISTS custom_providers(kind TEXT NOT NULL,tmdb_id INTEGER NOT NULL,name TEXT NOT NULL,provider_id INTEGER,logo_path TEXT,PRIMARY KEY(kind,tmdb_id,name))');c.commit()
+  c.executescript('CREATE TABLE IF NOT EXISTS library(kind TEXT NOT NULL, tmdb_id INTEGER NOT NULL, title TEXT NOT NULL, poster TEXT, status TEXT DEFAULT "watchlist", watched INTEGER DEFAULT 0, rating INTEGER, PRIMARY KEY(kind,tmdb_id)); CREATE TABLE IF NOT EXISTS episodes(tmdb_id INTEGER NOT NULL, season INTEGER NOT NULL, episode INTEGER NOT NULL, watched_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(tmdb_id,season,episode));');c.execute('CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,username TEXT UNIQUE,display_name TEXT,salt TEXT,password_hash TEXT)');c.execute('CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY,expires INTEGER)');c.execute('CREATE TABLE IF NOT EXISTS netflix_unmatched(id INTEGER PRIMARY KEY, title TEXT NOT NULL, viewed_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT "pending", resolved_kind TEXT, resolved_tmdb_id INTEGER, resolved_season INTEGER, resolved_episode INTEGER, UNIQUE(title,viewed_at))');c.execute('CREATE TABLE IF NOT EXISTS netflix_ai_suggestions(row_id INTEGER PRIMARY KEY,proposal_json TEXT NOT NULL)');c.execute('CREATE TABLE IF NOT EXISTS custom_providers(kind TEXT NOT NULL,tmdb_id INTEGER NOT NULL,name TEXT NOT NULL,provider_id INTEGER,logo_path TEXT,PRIMARY KEY(kind,tmdb_id,name))');c.commit()
 
 class Credentials(BaseModel):
  username:str
