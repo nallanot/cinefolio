@@ -4,6 +4,8 @@ services:
     restart: unless-stopped
     environment:
       TMDB_API_KEY: ${TMDB_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
     networks:
       - traefik
     volumes:
