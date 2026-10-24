@@ -510,7 +510,7 @@ def auto_resolve_netflix(payload:NetflixAutoResolve):
     try:
      if sid not in cache:cache[sid]=[x['season_number'] for x in tmdb(f'tv/{sid}').get('seasons',[]) if x.get('season_number',0)>0]
      seasons=[season] if season is not None else cache[sid][:20]
-     number=re.search(r'^(?:episode|épisode|chapitre|chapter)\\s*(\\d+)\\b',episode_name,re.I)
+     number=re.search(r'^(?:episode|épisode|chapitre|chapter)\s*(\d+)\b',episode_name,re.I)
      matches=[]
      for sn in seasons:
       key=(sid,sn)
