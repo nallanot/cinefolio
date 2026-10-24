@@ -294,7 +294,8 @@ def viewing_history():
  return {'episodes':rows,'timezone':'UTC','note':'Dates enregistrées lors du marquage comme vu (UTC), pas nécessairement les dates réelles de visionnage. Durées TMDB disponibles seulement.'}
 
 # Netflix viewing activity CSV: explicit preview before applying any changes.
-import csv, io, re
+import csv, io, re, unicodedata
+from difflib import SequenceMatcher
 from datetime import datetime
 class NetflixCSV(BaseModel):
  csv_text:str
@@ -306,6 +307,11 @@ def netflix_date(raw):
   try:return datetime.strptime(raw,fmt).strftime('%Y-%m-%d 12:00:00')
   except ValueError:pass
  return None
+
+def netflix_norm(value):
+ value=unicodedata.normalize('NFKD',value.casefold())
+ value=''.join(c for c in value if not unicodedata.combining(c))
+ return re.sub(r'[^\w]+',' ',value).strip()
 
 def netflix_episode_title(title):
  parts=[x.strip() for x in title.split(':')]
@@ -337,7 +343,7 @@ def import_netflix(payload:NetflixCSV):
   shows=[dict(x) for x in c.execute("SELECT tmdb_id,title FROM library WHERE kind='tv'")]
   movies=[dict(x) for x in c.execute("SELECT tmdb_id,title FROM library WHERE kind='movie'")]
   existing={(x['tmdb_id'],x['season'],x['episode']) for x in c.execute('SELECT tmdb_id,season,episode FROM episodes')}
- norm=lambda t:re.sub(r'[^\w]+',' ',t.casefold()).strip()
+ norm=netflix_norm
  by_title={norm(x['title']):x['tmdb_id'] for x in shows}
  movie_titles={norm(x['title']):x['tmdb_id'] for x in movies}
  cache={}; discovered={}; new_shows={}; new_movies={}
@@ -350,6 +356,14 @@ def import_netflix(payload:NetflixCSV):
     field='name' if kind=='tv' else 'title'
     original='original_name' if kind=='tv' else 'original_title'
     matches=[x for x in hits if norm(x.get(field,'') or '')==norm(title) or norm(x.get(original,'') or '')==norm(title)]
+    if not matches:
+     # TMDB may index Netflix's French name as an alternative title.
+     for candidate in hits[:4]:
+      try:
+       alt=tmdb(f'{kind}/{candidate["id"]}/alternative_titles')
+       names=[a.get('title','') for a in alt.get('titles',alt.get('results',[]))]
+       if any(norm(name)==norm(title) for name in names):matches.append(candidate)
+      except Exception:pass
     discovered[key]=matches[0] if len(matches)==1 else None
    except Exception:discovered[key]=None
   return discovered[key]
@@ -365,7 +379,13 @@ def import_netflix(payload:NetflixCSV):
     if info:
      tmdb_id=info['id'];new_shows[tmdb_id]=(info.get('name') or series,info.get('poster_path'))
    if tmdb_id is None:
-    if len(unmatched)<30:unmatched.append(title)
+    # A colon can belong to a movie title, not an episode separator.
+    film=movie_titles.get(norm(title))
+    info=None if film is not None else lookup('movie',title)
+    if film is None and info:
+     film=info['id'];new_movies[film]=(info.get('title') or title,info.get('poster_path'))
+    if film is not None:movies_found.add(film)
+    elif len(unmatched)<30:unmatched.append(title)
     continue
    if season is None:
     key=(tmdb_id,'seasons')
@@ -382,6 +402,16 @@ def import_netflix(payload:NetflixCSV):
      except Exception:cache[key]=[]
     matches.extend((sn,e) for e in cache[key] if norm(e.get('name') or '')==norm(episode_name))
    if len(matches)!=1:
+    # Explicit Netflix episode numbers are reliable when season is known.
+    number=re.search(r'^(?:episode|épisode|chapitre|chapter)\s*(\d+)\b',episode_name,re.I)
+    if number and season is not None:
+     matches=[(season,e) for e in cache.get((tmdb_id,season),[]) if e.get('episode_number')==int(number.group(1))]
+   if len(matches)!=1:
+    # Compare translated episode titles conservatively, within the known season.
+    candidates=[(sn,e) for sn in seasons for e in cache.get((tmdb_id,sn),[]) if e.get('name')]
+    scores=sorted(((SequenceMatcher(None,norm(episode_name),norm(e['name'])).ratio(),sn,e) for sn,e in candidates),reverse=True,key=lambda x:x[0])
+    if scores and scores[0][0]>=0.94 and (len(scores)==1 or scores[0][0]-scores[1][0]>=0.10):matches=[(scores[0][1],scores[0][2])]
+   if len(matches)!=1:
     if len(unmatched)<30:unmatched.append(title)
     continue
    sn,ep=matches[0];episode_key=(tmdb_id,sn,int(ep['episode_number']))
@@ -394,7 +424,7 @@ def import_netflix(payload:NetflixCSV):
      mid=info['id'];new_movies[mid]=(info.get('title') or title,info.get('poster_path'))
    if mid is not None:movies_found.add(mid)
    elif len(unmatched)<30:unmatched.append(title)
- result={'total_rows':len(rows),'episodes_to_import':len(proposed),'movies_to_mark_watched':len(movies_found),'new_series':len(new_shows),'new_movies':len(new_movies),'already_watched_not_overwritten':len(rows)-len(proposed)-len(movies_found)-invalid-len(unmatched),'unmatched_examples':unmatched,'invalid_rows':invalid,'note':'Correspondance exacte avec les séries déjà dans Cinéfolio. Les éléments non reconnus sont ignorés.'}
+ result={'total_rows':len(rows),'episodes_to_import':len(proposed),'movies_to_mark_watched':len(movies_found),'new_series':len(new_shows),'new_movies':len(new_movies),'already_watched_not_overwritten':len(existing.intersection(proposed)),'unmatched_examples':unmatched,'invalid_rows':invalid,'note':'Recherche des titres TMDB, numéros explicites et correspondances prudentes. Les ambiguïtés sont ignorées.'}
  if not payload.confirm:return result
  with closing(conn()) as c:
   for tmdb_id,(title,poster) in new_shows.items():c.execute('INSERT OR IGNORE INTO library(kind,tmdb_id,title,poster) VALUES(?,?,?,?)',('tv',tmdb_id,title,poster))
