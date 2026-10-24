@@ -451,6 +451,38 @@ def import_netflix(payload:NetflixCSV):
   c.commit()
  return {**result,'imported':True}
 
+@app.get('/api/tv/{tmdb_id}/episodes/search')
+def search_tv_episodes(tmdb_id:int,q:str):
+ import unicodedata
+ def norm(value):
+  value=unicodedata.normalize('NFKD',str(value or '').casefold())
+  return re.sub(r'[^a-z0-9]+',' ',''.join(c for c in value if not unicodedata.combining(c))).strip()
+ q=q.strip()
+ if not q:raise HTTPException(400,'Recherche vide')
+ match=re.search(r'(?:s(?:aison)?\\s*(\\d+)\\s*[- .]*e(?:pisode)?\\s*(\\d+)|(?:saison\\s*)?(\\d+)\\s*x\\s*(\\d+))',q,re.I)
+ season_number=int(match.group(1) or match.group(3)) if match else None
+ episode_number=int(match.group(2) or match.group(4)) if match else None
+ details=tmdb(f'tv/{tmdb_id}')
+ seasons=[x.get('season_number') for x in details.get('seasons',[]) if x.get('season_number') is not None and x.get('season_number')>=0]
+ if season_number is not None:seasons=[season_number] if season_number in seasons else []
+ needle=norm(q);results=[]
+ for sn in seasons[:60]:
+  data=tmdb(f'tv/{tmdb_id}/season/{sn}')
+  for ep in data.get('episodes',[]):
+   number=ep.get('episode_number')
+   if match:
+    if number!=episode_number:continue
+    score=100
+   else:
+    title=norm(ep.get('name'))
+    if not title:continue
+    if title==needle:score=100
+    elif needle in title:score=75
+    elif title in needle and len(title)>=5:score=55
+    else:continue
+   results.append({'season':sn,'episode':number,'name':ep.get('name'),'score':score})
+ return sorted(results,key=lambda x:(-x['score'],x['season'],x['episode']))[:60]
+
 class NetflixResolve(BaseModel):
  kind:str
  tmdb_id:int
