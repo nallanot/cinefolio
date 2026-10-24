@@ -645,12 +645,33 @@ def netflix_reanalyse_confirmed_series():
  threading.Thread(target=worker,daemon=True).start()
  return {'id':job_id,'series':len(series)}
 
+def netflix_movie_alternatives(title):
+ """Exact-title movie homonyms; never select a release year from a title alone."""
+ query=title.strip()
+ if ':' in query:return []
+ choices={}
+ for language in ('fr-CA','fr-FR','en-US'):
+  try:
+   for hit in tmdb('search/movie',{'query':query,'language':language}).get('results',[])[:20]:
+    names=[hit.get('title',''),hit.get('original_title','')]
+    if not any(netflix_normalize(n)==netflix_normalize(query) for n in names):continue
+    mid=hit['id']
+    choices[mid]={'kind':'movie','tmdb_id':mid,'title':hit.get('title') or hit.get('original_title'),'original_title':hit.get('original_title'),'year':(hit.get('release_date') or '')[:4],'poster':hit.get('poster_path'),'overview':(hit.get('overview') or '')[:450]}
+  except Exception:pass
+ return sorted(choices.values(),key=lambda x:(x['year'],x['tmdb_id']),reverse=True)[:8]
+
 @app.post('/api/import/netflix/ai/suggest')
 def netflix_ai_suggest(payload:NetflixAIScan):
  with closing(conn()) as c:
   row=c.execute("SELECT title FROM netflix_unmatched WHERE id=? AND status='pending'",(payload.row_id,)).fetchone()
  if not row:raise HTTPException(404,'Visionnement introuvable')
  title=row['title'];parsed=netflix_episode_title(title);query=parsed[0] if parsed else title
+ alternatives=netflix_movie_alternatives(title) if not parsed else []
+ if len(alternatives)>1:
+  proposal={'kind':'movie','tmdb_id':None,'confidence':0,'reason':'Plusieurs films portent ce titre. Choisissez la version réellement visionnée; aucun choix automatique.','ambiguous':True,'alternatives':alternatives}
+  with closing(conn()) as c:
+   c.execute('INSERT OR REPLACE INTO netflix_ai_suggestions(row_id,proposal_json) VALUES(?,?)',(payload.row_id,json.dumps(proposal)));c.commit()
+  return {'id':payload.row_id,'title':title,'suggestion':proposal}
  learned=netflix_learned_suggestion(title)
  if learned:
   with closing(conn()) as c:
