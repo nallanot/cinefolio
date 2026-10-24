@@ -397,7 +397,8 @@ def import_netflix(payload:NetflixCSV):
  result={'total_rows':len(rows),'episodes_to_import':len(proposed),'movies_to_mark_watched':len(movies_found),'new_series':len(new_shows),'new_movies':len(new_movies),'already_watched_not_overwritten':len(rows)-len(proposed)-len(movies_found)-invalid-len(unmatched),'unmatched_examples':unmatched,'invalid_rows':invalid,'note':'Correspondance exacte avec les séries déjà dans Cinéfolio. Les éléments non reconnus sont ignorés.'}
  if not payload.confirm:return result
  with closing(conn()) as c:
-  for tmdb_id,(title,poster) in new_shows.items():c.execute('INSERT OR IGNORE INTO library(kind,tmdb_id,title,poster) VALUES(?,?,?,?)',('tv',tmdb_id,title,poster))\n  for tmdb_id,(title,poster) in new_movies.items():c.execute('INSERT OR IGNORE INTO library(kind,tmdb_id,title,poster) VALUES(?,?,?,?)',('movie',tmdb_id,title,poster))
+  for tmdb_id,(title,poster) in new_shows.items():c.execute('INSERT OR IGNORE INTO library(kind,tmdb_id,title,poster) VALUES(?,?,?,?)',('tv',tmdb_id,title,poster))
+  for tmdb_id,(title,poster) in new_movies.items():c.execute('INSERT OR IGNORE INTO library(kind,tmdb_id,title,poster) VALUES(?,?,?,?)',('movie',tmdb_id,title,poster))
   for (tmdb_id,season,episode),when in proposed.items():
    c.execute('INSERT OR IGNORE INTO episodes(tmdb_id,season,episode,watched_at) VALUES(?,?,?,?)',(tmdb_id,season,episode,when))
   for tmdb_id in movies_found:c.execute("UPDATE library SET watched=1 WHERE kind='movie' AND tmdb_id=?",(tmdb_id,))
