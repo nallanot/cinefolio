@@ -310,15 +310,13 @@ def netflix_date(raw):
 def netflix_episode_title(title):
  parts=[x.strip() for x in title.split(':')]
  if len(parts)<2:return None
- # Netflix exports localized seasons, miniseries and numbered episodes.
- season_match=re.fullmatch(r'(?:season|saison|series|série|partie|part)\s*(\d+)',parts[1],re.I)
- if season_match and len(parts)>=3:
-  return parts[0],int(season_match.group(1)),':'.join(parts[2:]).strip()
- if re.fullmatch(r'(?:miniseries|mini-série|minisérie|limited series)',parts[1],re.I) and len(parts)>=3:
-  return parts[0],1,':'.join(parts[2:]).strip()
- if re.fullmatch(r'(?:episode|épisode)\s*\d+',parts[1],re.I):
-  return parts[0],1,':'.join(parts[1:]).strip()
- return None
+ if len(parts)>=3:
+  season=re.fullmatch(r'(?:season|saison|series|série|partie|part)\s*(\d+)',parts[1],re.I)
+  if season:return parts[0],int(season.group(1)),':'.join(parts[2:]).strip()
+  if re.fullmatch(r'(?:miniseries|mini-série|minisérie|limited series)',parts[1],re.I):return parts[0],1,':'.join(parts[2:]).strip()
+ if re.fullmatch(r'(?:episode|épisode|chapitre|chapter)\s*\d+',parts[1],re.I):return parts[0],1,':'.join(parts[1:]).strip()
+ # A series may have a named episode without a season label.
+ return parts[0],None,':'.join(parts[1:]).strip()
 
 @app.post('/api/import/netflix')
 def import_netflix(payload:NetflixCSV):
@@ -340,7 +338,7 @@ def import_netflix(payload:NetflixCSV):
   movies=[dict(x) for x in c.execute("SELECT tmdb_id,title FROM library WHERE kind='movie'")]
   existing={(x['tmdb_id'],x['season'],x['episode']) for x in c.execute('SELECT tmdb_id,season,episode FROM episodes')}
  norm=lambda t:re.sub(r'[^\w]+',' ',t.casefold()).strip()
- by_title={norm(x['title']):x['tmdb_id'] for x in shows}
+ by_title={norm(x['title']):x['tmdb_id'] for x in shows}\n  existing_show_ids={x['tmdb_id'] for x in shows}\n  existing_movie_ids={x['tmdb_id'] for x in movies}
  movie_titles={norm(x['title']):x['tmdb_id'] for x in movies}
  cache={}
  proposed={}; unmatched=[]; movies_found=set(); invalid=0
@@ -363,15 +361,15 @@ def import_netflix(payload:NetflixCSV):
    if len(exact)!=1:
     if len(unmatched)<30:unmatched.append(title)
     continue
-   ep=int(exact[0]['episode_number']);episode_key=(tmdb_id,season,ep)
+   ep=int(exact[0][1]['episode_number']);episode_key=(tmdb_id,season,ep)
    if episode_key not in existing:proposed.setdefault(episode_key,when)
   elif norm(title) in movie_titles:
    movies_found.add(movie_titles[norm(title)])
   elif len(unmatched)<30:unmatched.append(title)
- result={'total_rows':len(rows),'episodes_to_import':len(proposed),'movies_to_mark_watched':len(movies_found),'already_watched_not_overwritten':len(rows)-len(proposed)-len(movies_found)-invalid-len(unmatched),'unmatched_examples':unmatched,'invalid_rows':invalid,'note':'Correspondance exacte avec les séries déjà dans Cinéfolio. Les éléments non reconnus sont ignorés.'}
+ result={'total_rows':len(rows),'episodes_to_import':len(proposed),'movies_to_mark_watched':len(movies_found),'new_series':len(new_shows),'new_movies':len(new_movies),'already_watched_not_overwritten':len(rows)-len(proposed)-len(movies_found)-invalid-len(unmatched),'unmatched_examples':unmatched,'invalid_rows':invalid,'note':'Correspondance exacte avec les séries déjà dans Cinéfolio. Les éléments non reconnus sont ignorés.'}
  if not payload.confirm:return result
  with closing(conn()) as c:
-  for (tmdb_id,season,episode),when in proposed.items():
+  for tmdb_id,(title,poster) in new_shows.items():c.execute('INSERT OR IGNORE INTO library(kind,tmdb_id,title,poster) VALUES(?,?,?,?)',('tv',tmdb_id,title,poster))\n  for tmdb_id,(title,poster) in new_movies.items():c.execute('INSERT OR IGNORE INTO library(kind,tmdb_id,title,poster) VALUES(?,?,?,?)',('movie',tmdb_id,title,poster))\n  for (tmdb_id,season,episode),when in proposed.items():
    c.execute('INSERT OR IGNORE INTO episodes(tmdb_id,season,episode,watched_at) VALUES(?,?,?,?)',(tmdb_id,season,episode,when))
   for tmdb_id in movies_found:c.execute("UPDATE library SET watched=1 WHERE kind='movie' AND tmdb_id=?",(tmdb_id,))
   c.commit()
