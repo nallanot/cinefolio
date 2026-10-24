@@ -384,11 +384,11 @@ def import_netflix(payload:NetflixCSV):
     info=None if film is not None else lookup('movie',title)
     if film is None and info:
      film=info['id'];new_movies[film]=(info.get('title') or title,info.get('poster_path'))
-    if film is not None:movies_found.add(film)
+    if film is not None:
+     movies_found.add(film)
     else:
-    if len(unmatched)<30:unmatched.append(title)
-    unmatched_rows.append((title,when))
-    unmatched_rows.append((title,when))
+     if len(unmatched)<30:unmatched.append(title)
+     unmatched_rows.append((title,when))
     continue
    if season is None:
     key=(tmdb_id,'seasons')
@@ -427,7 +427,9 @@ def import_netflix(payload:NetflixCSV):
     if info:
      mid=info['id'];new_movies[mid]=(info.get('title') or title,info.get('poster_path'))
    if mid is not None:movies_found.add(mid)
-   elif len(unmatched)<30:unmatched.append(title)
+   else:
+    if len(unmatched)<30:unmatched.append(title)
+    unmatched_rows.append((title,when))
  result={'total_rows':len(rows),'episodes_to_import':len(proposed),'movies_to_mark_watched':len(movies_found),'new_series':len(new_shows),'new_movies':len(new_movies),'already_watched_not_overwritten':len(existing.intersection(proposed)),'unmatched_examples':unmatched,'invalid_rows':invalid,'note':'Recherche des titres TMDB, numéros explicites et correspondances prudentes. Les ambiguïtés sont ignorées.'}
  if not payload.confirm:return result
  with closing(conn()) as c:
