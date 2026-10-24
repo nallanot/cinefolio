@@ -591,6 +591,13 @@ def netflix_ai_suggest(payload:NetflixAIScan):
   c.execute('INSERT OR REPLACE INTO netflix_ai_suggestions(row_id,proposal_json) VALUES(?,?)',(payload.row_id,json.dumps(proposal)));c.commit()
  return {'id':payload.row_id,'title':title,'suggestion':proposal}
 
+@app.delete('/api/import/netflix/ai/suggestions/{row_id}')
+def netflix_ai_delete_suggestion(row_id:int):
+ with closing(conn()) as c:
+  c.execute('DELETE FROM netflix_ai_suggestions WHERE row_id=?',(row_id,))
+  c.commit()
+ return {'ok':True}
+
 @app.get('/api/import/netflix/ai/suggestions')
 def netflix_ai_list():
  with closing(conn()) as c:
