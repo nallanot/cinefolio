@@ -51,7 +51,7 @@ async function removeItem(kind,id){const item=state.library.find(x=>x.kind===kin
 async function addHit(i){const x=state.results[i];try{await api('/api/library',json('POST',{kind:x.media_type,tmdb_id:x.id,title:x.title||x.name,poster:x.poster_path}));$('#searchResults').classList.add('hidden');$('#query').value='';await refresh();await dashboard();toast('Ajouté à votre bibliothèque')}catch(e){toast(e.message)}}
 
 let failedRows=[],failedSelected=null,failedCandidates=[],failedEpisodes=[];
-function unmatchedPage(){return section('Imports échoués','<div class="panel"><p class="muted">Visionnements Netflix non reconnus. Sélectionne un élément et associe-le au bon titre TMDB. Les dates originales sont conservées.</p><button id="reloadFailed" class="ghost">Actualiser</button> <button id="aiFailed" class="primary">Analyser avec ChatGPT</button><p id="aiFailedStatus" class="muted"></p><div id="aiFailedProposals"></div> <button id="autoFailed" class="primary">Recherche automatique (20 éléments)</button><p id="autoFailedStatus" class="muted"></p><p id="failedCount" class="muted">Chargement…</p><div id="failedRows"></div></div><div class="panel" id="failedEditor" style="display:none"><h3 id="failedTitle"></h3><label>Rechercher dans TMDB</label><input id="failedQuery"><button id="lookupFailed" class="ghost">Rechercher</button><div id="failedHits"></div><label>Type</label><select id="failedKind"><option value="tv">Série</option><option value="movie">Film</option></select><div id="failedEpisodeFields"><label>Rechercher un épisode (nom, S02E05 ou 2x05)</label><input id="failedEpisodeQuery" placeholder="Nom de l’épisode ou S02E05"><button id="failedEpisodeSearch" class="ghost">Trouver l’épisode</button><div id="failedEpisodeHits"></div><label>Saison</label><select id="failedSeason"></select><label>Épisode</label><select id="failedEpisode"></select></div><button id="saveFailed" class="primary" disabled>Confirmer cette correspondance</button><p id="failedStatus" class="muted"></p></div>')}
+function unmatchedPage(){return section('Imports échoués','<div class="panel"><p class="muted">Visionnements Netflix non reconnus. Sélectionne un élément et associe-le au bon titre TMDB. Les dates originales sont conservées.</p><button id="reloadFailed" class="ghost">Actualiser</button> <button id="aiFailed" class="primary">Analyser 20 éléments avec ChatGPT</button><p id="aiFailedStatus" class="muted"></p><div id="aiFailedProposals"></div> <button id="autoFailed" class="primary">Recherche automatique (20 éléments)</button><p id="autoFailedStatus" class="muted"></p><p id="failedCount" class="muted">Chargement…</p><div id="failedRows"></div></div><div class="panel" id="failedEditor" style="display:none"><h3 id="failedTitle"></h3><label>Rechercher dans TMDB</label><input id="failedQuery"><button id="lookupFailed" class="ghost">Rechercher</button><div id="failedHits"></div><label>Type</label><select id="failedKind"><option value="tv">Série</option><option value="movie">Film</option></select><div id="failedEpisodeFields"><label>Rechercher un épisode (nom, S02E05 ou 2x05)</label><input id="failedEpisodeQuery" placeholder="Nom de l’épisode ou S02E05"><button id="failedEpisodeSearch" class="ghost">Trouver l’épisode</button><div id="failedEpisodeHits"></div><label>Saison</label><select id="failedSeason"></select><label>Épisode</label><select id="failedEpisode"></select></div><button id="saveFailed" class="primary" disabled>Confirmer cette correspondance</button><p id="failedStatus" class="muted"></p></div>')}
 async function autoResolveFailed(){
  const button=$('#autoFailed'),status=$('#autoFailedStatus');
  button.disabled=true;status.textContent='Analyse automatique des 20 premiers éléments…';
@@ -78,16 +78,18 @@ async function loadAIProposals(){
 async function analyzeFailedWithAI(){
  const btn=$('#aiFailed'),status=$('#aiFailedStatus');btn.disabled=true;
  try{
-  const rows=await api('/api/import/netflix/unmatched');
-  const proposals=await api('/api/import/netflix/ai/suggestions');
-  const done=new Set(proposals.map(x=>x.id));
-  const row=rows.find(x=>!done.has(x.id));
-  if(!row){status.textContent='Tous les éléments ont déjà été analysés.';return}
-  status.textContent='Analyse IA : '+row.title;
-  const result=await api('/api/import/netflix/ai/suggest',json('POST',{row_id:row.id}));
-  status.textContent=result.suggestion?'Proposition enregistrée. Confirme-la ci-dessous.':'Aucune correspondance suffisamment fiable.';
+  const job=await api('/api/import/netflix/ai/batch',json('POST',{limit:20}));
+  status.textContent='Analyse IA lancée. Recherche en arrière-plan…';
+  let finished=false;
+  while(!finished){
+   await new Promise(resolve=>setTimeout(resolve,2000));
+   const progress=await api('/api/import/netflix/ai/batch/'+job.id);
+   const current=$('#aiFailedStatus');if(current)current.textContent=progress.processed+'/'+progress.total+' analysés · '+progress.matched+' propositions · '+progress.errors.length+' erreurs';
+   finished=['completed','cancelled'].includes(progress.status);
+  }
   await loadAIProposals();
- }catch(e){status.textContent=e.message}finally{btn.disabled=false}
+ }catch(e){if($('#aiFailedStatus'))$('#aiFailedStatus').textContent=e.message}
+ finally{if($('#aiFailed'))$('#aiFailed').disabled=false}
 }
 async function confirmAIProposal(id,rows){
  const x=rows.find(r=>r.id===id),p=x?.suggestion;if(!p)return;
