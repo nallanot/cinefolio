@@ -483,6 +483,72 @@ def search_tv_episodes(tmdb_id:int,q:str):
    results.append({'season':sn,'episode':number,'name':ep.get('name'),'score':score})
  return sorted(results,key=lambda x:(-x['score'],x['season'],x['episode']))[:60]
 
+class NetflixAutoResolve(BaseModel):
+ confirm:bool=False
+ limit:int=20
+
+@app.post('/api/import/netflix/unmatched/auto')
+def auto_resolve_netflix(payload:NetflixAutoResolve):
+ limit=max(1,min(payload.limit,40))
+ with closing(conn()) as c:
+  rows=[dict(x) for x in c.execute("SELECT id,title,viewed_at FROM netflix_unmatched WHERE status='pending' ORDER BY id LIMIT ?",(limit,))]
+  library_titles={(x['kind'],netflix_norm(x['title'])):x['tmdb_id'] for x in c.execute('SELECT kind,title,tmdb_id FROM library')}
+ suggestions=[];skipped=0;cache={}
+ for row in rows:
+  title=row['title'];parsed=netflix_episode_title(title);choice=None
+  if parsed:
+   series,season,episode_name=parsed
+   sid=library_titles.get(('tv',netflix_norm(series)))
+   if sid is None:
+    try:
+     hits=tmdb('search/tv',{'query':series}).get('results',[])
+     hits=[h for h in hits if netflix_norm(h.get('name',''))==netflix_norm(series) or netflix_norm(h.get('original_name',''))==netflix_norm(series)]
+     if len(hits)==1:sid=hits[0]['id']
+    except Exception:pass
+   if sid is not None:
+    try:
+     if sid not in cache:cache[sid]=[x['season_number'] for x in tmdb(f'tv/{sid}').get('seasons',[]) if x.get('season_number',0)>0]
+     seasons=[season] if season is not None else cache[sid][:20]
+     number=re.search(r'^(?:episode|épisode|chapitre|chapter)\\s*(\\d+)\\b',episode_name,re.I)
+     matches=[]
+     for sn in seasons:
+      key=(sid,sn)
+      if key not in cache:cache[key]=tmdb(f'tv/{sid}/season/{sn}').get('episodes',[])
+      for ep in cache[key]:
+       name=netflix_norm(ep.get('name',''))
+       if (number and season is not None and ep.get('episode_number')==int(number.group(1))) or (not number and name and name==netflix_norm(episode_name)):
+        matches.append((sn,ep))
+     if len(matches)==1:
+      sn,ep=matches[0]
+      choice={'kind':'tv','tmdb_id':sid,'season':sn,'episode':ep['episode_number'],'match':ep.get('name')}
+    except Exception:pass
+  else:
+   mid=library_titles.get(('movie',netflix_norm(title)))
+   if mid is None:
+    try:
+     hits=tmdb('search/movie',{'query':title}).get('results',[])
+     hits=[h for h in hits if netflix_norm(h.get('title',''))==netflix_norm(title) or netflix_norm(h.get('original_title',''))==netflix_norm(title)]
+     if len(hits)==1:mid=hits[0]['id']
+    except Exception:pass
+   if mid is not None:choice={'kind':'movie','tmdb_id':mid,'match':title}
+  if choice:suggestions.append({'id':row['id'],'title':title,**choice})
+  else:skipped+=1
+ if payload.confirm and suggestions:
+  with closing(conn()) as c:
+   c.execute('BEGIN IMMEDIATE')
+   for item in suggestions:
+    row=c.execute("SELECT viewed_at FROM netflix_unmatched WHERE id=? AND status='pending'",(item['id'],)).fetchone()
+    if not row:continue
+    kind=item['kind'];mid=item['tmdb_id']
+    try:details=tmdb(f'{kind}/{mid}')
+    except Exception:continue
+    c.execute('INSERT OR IGNORE INTO library(kind,tmdb_id,title,poster) VALUES(?,?,?,?)',(kind,mid,details.get('name') or details.get('title') or item['title'],details.get('poster_path')))
+    if kind=='tv':c.execute('INSERT OR IGNORE INTO episodes(tmdb_id,season,episode,watched_at) VALUES(?,?,?,?)',(mid,item['season'],item['episode'],row['viewed_at']))
+    else:c.execute("UPDATE library SET watched=1 WHERE kind='movie' AND tmdb_id=?",(mid,))
+    c.execute("UPDATE netflix_unmatched SET status='resolved',resolved_kind=?,resolved_tmdb_id=?,resolved_season=?,resolved_episode=? WHERE id=?",(kind,mid,item.get('season'),item.get('episode'),item['id']))
+   c.commit()
+ return {'processed':len(rows),'matched':len(suggestions),'unmatched':skipped,'suggestions':suggestions,'applied':payload.confirm}
+
 class NetflixResolve(BaseModel):
  kind:str
  tmdb_id:int
