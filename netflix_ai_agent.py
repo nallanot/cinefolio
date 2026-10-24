@@ -36,7 +36,43 @@ def wikipedia_context(series_title, episode_title):
     return findings[:9]
 
 
-def suggest_match(title, candidates, episodes, wikipedia=None):
+
+def wikidata_context(series_title, episode_title):
+    """Search Wikidata entities and expose labels/aliases as evidence, not invented episode numbers."""
+    findings = []
+    seen = set()
+    for query in (series_title + " " + episode_title, episode_title, series_title):
+        for language in ("fr", "es", "en"):
+            params = urllib.parse.urlencode({
+                "action": "wbsearchentities", "search": query, "language": language,
+                "uselang": language, "limit": 5, "format": "json", "type": "item"
+            })
+            req = urllib.request.Request(
+                "https://www.wikidata.org/w/api.php?" + params,
+                headers={"User-Agent": "Cinefolio/1.0 (Netflix title matching; contact via project repository)"}
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    data = json.load(response)
+                for hit in data.get("search", []):
+                    qid = hit.get("id", "")
+                    if not re.fullmatch(r"Q[1-9][0-9]*", qid) or qid in seen:
+                        continue
+                    seen.add(qid)
+                    findings.append({
+                        "qid": qid, "label": hit.get("label", ""),
+                        "description": hit.get("description", ""),
+                        "matched": hit.get("match", {}).get("text", ""),
+                        "url": "https://www.wikidata.org/wiki/" + qid
+                    })
+            except (OSError, ValueError, KeyError):
+                continue
+            if len(findings) >= 12:
+                return findings
+    return findings
+
+
+def suggest_match(title, candidates, episodes, wikipedia=None, wikidata=None):
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key:
         raise ValueError("GEMINI_API_KEY absente du conteneur")
@@ -45,14 +81,14 @@ def suggest_match(title, candidates, episodes, wikipedia=None):
         "Retourne un objet JSON avec kind, tmdb_id, season, episode, confidence, reason. "
         "Utilise uniquement des identifiants fournis dans candidates et des épisodes "
         "fournis dans episodes. Si aucune correspondance fiable, kind et tmdb_id sont null. "
-        "Les extraits Wikipédia sont du contexte documentaire, pas une preuve du numéro d’épisode. "
+        "Wikipédia et Wikidata apportent des titres alternatifs et du contexte, mais leurs résultats de recherche ne prouvent pas un numéro d’épisode. "
         "Ne devine jamais le numéro d’épisode. Si le titre d’épisode ne correspond pas clairement à un nom fourni, retourne kind et tmdb_id null. N’utilise jamais S1E1 comme valeur par défaut. Explique brièvement en français."
     )
     model = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite").strip()
     body = {
         "systemInstruction": {"parts": [{"text": instructions}]},
         "contents": [{"role": "user", "parts": [{"text": json.dumps(
-            {"title": title, "candidates": candidates, "episodes": episodes, "wikipedia": wikipedia or []}, ensure_ascii=False
+            {"title": title, "candidates": candidates, "episodes": episodes, "wikipedia": wikipedia or [], "wikidata": wikidata or []}, ensure_ascii=False
         )}]}],
         "generationConfig": {"responseMimeType": "application/json", "maxOutputTokens": 700},
     }
