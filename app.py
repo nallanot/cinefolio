@@ -1,5 +1,6 @@
 import os, sqlite3, urllib.request, urllib.parse, json, time, threading, secrets, hashlib, hmac
 from contextlib import closing
+from netflix_ai_agent import suggest_match
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
@@ -13,7 +14,7 @@ def conn():
 def init():
  os.makedirs('/data',exist_ok=True)
  with closing(conn()) as c:
-  c.executescript('CREATE TABLE IF NOT EXISTS library(kind TEXT NOT NULL, tmdb_id INTEGER NOT NULL, title TEXT NOT NULL, poster TEXT, status TEXT DEFAULT "watchlist", watched INTEGER DEFAULT 0, rating INTEGER, PRIMARY KEY(kind,tmdb_id)); CREATE TABLE IF NOT EXISTS episodes(tmdb_id INTEGER NOT NULL, season INTEGER NOT NULL, episode INTEGER NOT NULL, watched_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(tmdb_id,season,episode));');c.execute('CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,username TEXT UNIQUE,display_name TEXT,salt TEXT,password_hash TEXT)');c.execute('CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY,expires INTEGER)');c.execute('CREATE TABLE IF NOT EXISTS netflix_unmatched(id INTEGER PRIMARY KEY, title TEXT NOT NULL, viewed_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT "pending", resolved_kind TEXT, resolved_tmdb_id INTEGER, resolved_season INTEGER, resolved_episode INTEGER, UNIQUE(title,viewed_at))');c.execute('CREATE TABLE IF NOT EXISTS custom_providers(kind TEXT NOT NULL,tmdb_id INTEGER NOT NULL,name TEXT NOT NULL,provider_id INTEGER,logo_path TEXT,PRIMARY KEY(kind,tmdb_id,name))');c.commit()
+  c.executescript('CREATE TABLE IF NOT EXISTS library(kind TEXT NOT NULL, tmdb_id INTEGER NOT NULL, title TEXT NOT NULL, poster TEXT, status TEXT DEFAULT "watchlist", watched INTEGER DEFAULT 0, rating INTEGER, PRIMARY KEY(kind,tmdb_id)); CREATE TABLE IF NOT EXISTS episodes(tmdb_id INTEGER NOT NULL, season INTEGER NOT NULL, episode INTEGER NOT NULL, watched_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(tmdb_id,season,episode));');c.execute('CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,username TEXT UNIQUE,display_name TEXT,salt TEXT,password_hash TEXT)');c.execute('CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY,expires INTEGER)');c.execute('CREATE TABLE IF NOT EXISTS netflix_unmatched(id INTEGER PRIMARY KEY, title TEXT NOT NULL, viewed_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT "pending", resolved_kind TEXT, resolved_tmdb_id INTEGER, resolved_season INTEGER, resolved_episode INTEGER, UNIQUE(title,viewed_at))');c.execute('CREATE TABLE IF NOT EXISTS netflix_ai_suggestions(row_id INTEGER PRIMARY KEY,proposal_json TEXT NOT NULL)');c.execute('CREATE TABLE IF NOT EXISTS custom_providers(kind TEXT NOT NULL,tmdb_id INTEGER NOT NULL,name TEXT NOT NULL,provider_id INTEGER,logo_path TEXT,PRIMARY KEY(kind,tmdb_id,name))');c.commit()
 
 class Credentials(BaseModel):
  username:str
@@ -509,7 +510,7 @@ def auto_resolve_netflix(payload:NetflixAutoResolve):
     try:
      if sid not in cache:cache[sid]=[x['season_number'] for x in tmdb(f'tv/{sid}').get('seasons',[]) if x.get('season_number',0)>0]
      seasons=[season] if season is not None else cache[sid][:20]
-     number=re.search(r'^(?:episode|épisode|chapitre|chapter)\\s*(\\d+)\\b',episode_name,re.I)
+     number=re.search(r'^(?:episode|épisode|chapitre|chapter)\s*(\d+)\b',episode_name,re.I)
      matches=[]
      for sn in seasons:
       key=(sid,sn)
@@ -548,6 +549,92 @@ def auto_resolve_netflix(payload:NetflixAutoResolve):
     c.execute("UPDATE netflix_unmatched SET status='resolved',resolved_kind=?,resolved_tmdb_id=?,resolved_season=?,resolved_episode=? WHERE id=?",(kind,mid,item.get('season'),item.get('episode'),item['id']))
    c.commit()
  return {'processed':len(rows),'matched':len(suggestions),'unmatched':skipped,'suggestions':suggestions,'applied':payload.confirm}
+
+
+class NetflixAIScan(BaseModel):
+ row_id:int
+
+@app.post('/api/import/netflix/ai/suggest')
+def netflix_ai_suggest(payload:NetflixAIScan):
+ if not os.getenv('OPENAI_API_KEY'):raise HTTPException(503,'OPENAI_API_KEY manquante')
+ with closing(conn()) as c:
+  row=c.execute("SELECT title FROM netflix_unmatched WHERE id=? AND status='pending'",(payload.row_id,)).fetchone()
+ if not row:raise HTTPException(404,'Visionnement introuvable')
+ title=row['title'];parsed=netflix_episode_title(title);query=parsed[0] if parsed else title
+ candidates=[];episodes=[]
+ for kind in ('tv','movie'):
+  try:
+   for hit in tmdb('search/'+kind,{'query':query}).get('results',[])[:5]:
+    candidates.append({'kind':kind,'id':hit['id'],'title':hit.get('name') or hit.get('title'),'original':hit.get('original_name') or hit.get('original_title')})
+  except Exception:pass
+ if parsed:
+  for item in [x for x in candidates if x['kind']=='tv'][:2]:
+   try:
+    seasons=[parsed[1]] if parsed[1] is not None else [x['season_number'] for x in tmdb('tv/'+str(item['id'])).get('seasons',[]) if x.get('season_number',0)>0][:5]
+    for sn in seasons:
+     for ep in tmdb('tv/'+str(item['id'])+'/season/'+str(sn)).get('episodes',[])[:35]:
+      episodes.append({'id':item['id'],'season':sn,'episode':ep['episode_number'],'name':ep.get('name','')})
+   except Exception:pass
+ try:proposal=suggest_match(title,candidates,episodes[:500]) if candidates else None
+ except Exception as exc:raise HTTPException(502,'Recherche IA indisponible : '+type(exc).__name__)
+ with closing(conn()) as c:
+  c.execute('INSERT OR REPLACE INTO netflix_ai_suggestions(row_id,proposal_json) VALUES(?,?)',(payload.row_id,json.dumps(proposal)));c.commit()
+ return {'id':payload.row_id,'title':title,'suggestion':proposal}
+
+@app.get('/api/import/netflix/ai/suggestions')
+def netflix_ai_list():
+ with closing(conn()) as c:
+  rows=c.execute("SELECT s.row_id,u.title,s.proposal_json FROM netflix_ai_suggestions s JOIN netflix_unmatched u ON u.id=s.row_id WHERE u.status='pending' ORDER BY s.row_id DESC").fetchall()
+ return [{'id':x['row_id'],'title':x['title'],'suggestion':json.loads(x['proposal_json'])} for x in rows]
+
+
+_ai_jobs={}
+_ai_jobs_lock=threading.Lock()
+
+def _ai_batch_worker(job_id,limit):
+ with _ai_jobs_lock:_ai_jobs[job_id]['status']='running'
+ with closing(conn()) as c:
+  rows=c.execute("SELECT u.id FROM netflix_unmatched u LEFT JOIN netflix_ai_suggestions s ON s.row_id=u.id WHERE u.status='pending' AND s.row_id IS NULL ORDER BY u.id LIMIT ?",(limit,)).fetchall()
+ with _ai_jobs_lock:_ai_jobs[job_id]['total']=len(rows)
+ for row in rows:
+  with _ai_jobs_lock:
+   if _ai_jobs[job_id]['status']=='cancelled':break
+  try:
+   result=netflix_ai_suggest(NetflixAIScan(row_id=row['id']))
+   with _ai_jobs_lock:
+    if result['suggestion']:_ai_jobs[job_id]['matched']+=1
+  except Exception as exc:
+   with _ai_jobs_lock:_ai_jobs[job_id]['errors'].append({'id':row['id'],'message':str(getattr(exc,'detail',type(exc).__name__))[:180]})
+  with _ai_jobs_lock:_ai_jobs[job_id]['processed']+=1
+ with _ai_jobs_lock:
+  if _ai_jobs[job_id]['status']!='cancelled':_ai_jobs[job_id]['status']='completed'
+
+class NetflixAIBatch(BaseModel):
+ limit:int=20
+
+@app.post('/api/import/netflix/ai/batch')
+def netflix_ai_batch(payload:NetflixAIBatch):
+ if not os.getenv('OPENAI_API_KEY'):raise HTTPException(503,'OPENAI_API_KEY manquante')
+ limit=max(1,min(payload.limit,100))
+ with _ai_jobs_lock:
+  if any(j['status'] in ('queued','running') for j in _ai_jobs.values()):raise HTTPException(409,'Une analyse IA est déjà en cours')
+  job_id=secrets.token_hex(8)
+  _ai_jobs[job_id]={'id':job_id,'status':'queued','total':0,'processed':0,'matched':0,'errors':[]}
+ threading.Thread(target=_ai_batch_worker,args=(job_id,limit),daemon=True).start()
+ return {'id':job_id}
+
+@app.get('/api/import/netflix/ai/batch/{job_id}')
+def netflix_ai_batch_status(job_id:str):
+ with _ai_jobs_lock:
+  if job_id not in _ai_jobs:raise HTTPException(404,'Analyse introuvable (redémarrage du serveur possible)')
+  return dict(_ai_jobs[job_id])
+
+@app.post('/api/import/netflix/ai/batch/{job_id}/cancel')
+def netflix_ai_batch_cancel(job_id:str):
+ with _ai_jobs_lock:
+  if job_id not in _ai_jobs:raise HTTPException(404,'Analyse introuvable')
+  if _ai_jobs[job_id]['status'] in ('queued','running'):_ai_jobs[job_id]['status']='cancelled'
+  return dict(_ai_jobs[job_id])
 
 class NetflixResolve(BaseModel):
  kind:str
