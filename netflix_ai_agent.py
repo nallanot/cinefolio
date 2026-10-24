@@ -15,7 +15,7 @@ def suggest_match(title, candidates, episodes):
         "Retourne un objet JSON avec kind, tmdb_id, season, episode, confidence, reason. "
         "Utilise uniquement des identifiants fournis dans candidates et des épisodes "
         "fournis dans episodes. Si aucune correspondance fiable, kind et tmdb_id sont null. "
-        "Ne devine pas. Explique brièvement en français."
+        "Ne devine jamais le numéro d’épisode. Si le titre d’épisode ne correspond pas clairement à un nom fourni, retourne kind et tmdb_id null. N’utilise jamais S1E1 comme valeur par défaut. Explique brièvement en français."
     )
     model = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash").strip()
     body = {
@@ -57,6 +57,27 @@ def suggest_match(title, candidates, episodes):
         return None
     if not any(c.get("kind") == kind and c.get("id") == tmdb_id for c in candidates):
         return None
+    # Reject arbitrary episode selection even if Gemini invents a high confidence score.
+    if kind == "tv":
+        suffix = title.split(":", 1)[1].strip() if ":" in title else ""
+        season, episode = proposal.get("season"), proposal.get("episode")
+        matching = [
+            e for e in episodes
+            if e.get("id") == tmdb_id and e.get("season") == season and e.get("episode") == episode
+        ]
+        if not matching or not suffix:
+            return None
+        import unicodedata
+        import re
+        def normalize(value):
+            value = unicodedata.normalize("NFKD", str(value).casefold())
+            value = "".join(ch for ch in value if not unicodedata.combining(ch))
+            return re.sub(r"[^a-z0-9]+", " ", value).strip()
+        episode_title = normalize(suffix)
+        names = [normalize(n) for n in matching[0].get("names", [matching[0].get("name", "")])]
+        # Only auto-propose a specific episode when a source title agrees.
+        if not any(n and (n == episode_title or (len(n) >= 8 and (n in episode_title or episode_title in n))) for n in names):
+            return None
     result = {
         "kind": kind,
         "tmdb_id": tmdb_id,
