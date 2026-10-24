@@ -132,6 +132,15 @@ class Episode(BaseModel):
  tmdb_id:int;season:int;episode:int;watched:bool=True
 @app.get('/api/search')
 def search(q:str):
+ q=q.strip()
+ imdb_match=__import__('re').search(r'(?:imdb\.com/title/)?(tt\d{7,10})',q,__import__('re').I)
+ if imdb_match:
+  found=tmdb('find/'+imdb_match.group(1).lower(),{'external_source':'imdb_id'})
+  results=[]
+  for kind,key in (('movie','movie_results'),('tv','tv_results')):
+   for item in found.get(key,[]):
+    results.append({**item,'media_type':kind,'imdb_id':imdb_match.group(1).lower()})
+  return results
  return tmdb('search/multi',{'query':q,'include_adult':'false'}).get('results',[])
 @app.get('/api/library')
 def library():
