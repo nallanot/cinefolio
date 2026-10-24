@@ -71,7 +71,8 @@ async function loadAIProposals(){
  const target=$('#aiFailedProposals');if(!target)return;
  try{
   const rows=await api('/api/import/netflix/ai/suggestions');
-  target.innerHTML=rows.filter(x=>x.suggestion).map(x=>'<div class="search-item"><div class="info"><strong>'+esc(x.title)+'</strong><small>'+esc(x.suggestion.kind)+' #'+x.suggestion.tmdb_id+(x.suggestion.kind==='tv'?' · S'+x.suggestion.season+'E'+x.suggestion.episode:'')+' · '+esc(x.suggestion.confidence)+' · '+esc(x.suggestion.reason)+'</small></div><button class="primary" data-aiconfirm="'+x.id+'">Confirmer</button></div>').join('');
+  target.innerHTML=rows.filter(x=>x.suggestion).map(x=>'<div class="search-item"><div class="info"><strong>'+esc(x.title)+'</strong><small>'+esc(x.suggestion.kind)+' #'+x.suggestion.tmdb_id+(x.suggestion.kind==='tv'?' · S'+x.suggestion.season+'E'+x.suggestion.episode:'')+' · '+esc(x.suggestion.confidence)+' · '+esc(x.suggestion.reason)+'</small></div><button data-aireject="'+x.id+'">Rejeter</button><button class="primary" data-aiconfirm="'+x.id+'">Confirmer</button></div>').join('');
+  document.querySelectorAll('[data-aireject]').forEach(b=>b.onclick=async()=>{try{await api('/api/import/netflix/ai/suggestions/'+b.dataset.aireject,{method:'DELETE'});await loadAIProposals();toast('Proposition rejetée; élément conservé pour réanalyse')}catch(e){toast(e.message)}});
   document.querySelectorAll('[data-aiconfirm]').forEach(b=>b.onclick=()=>confirmAIProposal(Number(b.dataset.aiconfirm),rows));
  }catch(e){target.textContent=e.message}
 }
