@@ -71,9 +71,26 @@ async function loadAIProposals(){
  const target=$('#aiFailedProposals');if(!target)return;
  try{
   const rows=await api('/api/import/netflix/ai/suggestions');
-  target.innerHTML=rows.filter(x=>x.suggestion).map(x=>'<div class="search-item"><div class="info"><strong>'+esc(x.title)+'</strong><small>'+esc(x.suggestion.kind)+' #'+x.suggestion.tmdb_id+(x.suggestion.kind==='tv'?' · S'+x.suggestion.season+'E'+x.suggestion.episode:'')+' · '+esc(x.suggestion.confidence)+' · '+esc(x.suggestion.reason)+'</small></div><button data-aireject="'+x.id+'">Rejeter</button><button class="primary" data-aiconfirm="'+x.id+'">Confirmer</button></div>').join('');
+  target.innerHTML=rows.filter(x=>x.suggestion).map(x=>{
+   const p=x.suggestion;
+   if(p.ambiguous&&p.alternatives?.length){
+    return '<div class="search-item"><div class="info"><strong>'+esc(x.title)+'</strong><small>Plusieurs versions possibles — sélection manuelle obligatoire</small>'+
+      p.alternatives.map(a=>'<div style="display:flex;gap:12px;align-items:center;margin:10px 0">'+(a.poster?'<img loading="lazy" style="width:52px;border-radius:4px" src="https://image.tmdb.org/t/p/w92'+encodeURIComponent(a.poster)+'">':'')+
+      '<div><strong>'+esc(a.title)+'</strong><small>'+esc(a.year||'Année inconnue')+' · TMDB #'+a.tmdb_id+' · '+esc(a.original_title||'')+'</small><small>'+esc(a.overview||'')+'</small></div><button data-aimovie="'+x.id+'" data-tmdb="'+a.tmdb_id+'">Choisir</button></div>').join('')+
+      '</div><button data-aireject="'+x.id+'">Rejeter</button></div>';
+   }
+   return '<div class="search-item"><div class="info"><strong>'+esc(x.title)+'</strong><small>'+esc(p.kind)+' #'+p.tmdb_id+(p.kind==='tv'?' · S'+p.season+'E'+p.episode:'')+' · '+esc(p.confidence)+' · '+esc(p.reason)+'</small></div><button data-aireject="'+x.id+'">Rejeter</button><button class="primary" data-aiconfirm="'+x.id+'">Confirmer</button></div>';
+  }).join('');
   document.querySelectorAll('[data-aireject]').forEach(b=>b.onclick=async()=>{try{await api('/api/import/netflix/ai/suggestions/'+b.dataset.aireject,{method:'DELETE'});await loadAIProposals();toast('Proposition rejetée; élément conservé pour réanalyse')}catch(e){toast(e.message)}});
   document.querySelectorAll('[data-aiconfirm]').forEach(b=>b.onclick=()=>confirmAIProposal(Number(b.dataset.aiconfirm),rows));
+  document.querySelectorAll('[data-aimovie]').forEach(b=>b.onclick=async()=>{
+   const id=Number(b.dataset.aimovie),mid=Number(b.dataset.tmdb),x=rows.find(r=>r.id===id),alt=x?.suggestion?.alternatives?.find(a=>a.tmdb_id===mid);
+   if(!alt||!await confirmInApp('Choisir la bonne version','Confirmer '+alt.title+' ('+(alt.year||'année inconnue')+') — TMDB #'+mid+' ?','Confirmer'))return;
+   try{
+    await api('/api/import/netflix/unmatched/'+id+'/resolve',json('POST',{kind:'movie',tmdb_id:mid}));
+    await loadUnmatched();await loadAIProposals();await refresh();await dashboard();toast('Film confirmé');
+   }catch(e){toast(e.message)}
+  });
  }catch(e){target.textContent=e.message}
 }
 async function reanalyseLearnedSeries(){
