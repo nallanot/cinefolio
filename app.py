@@ -814,6 +814,39 @@ class NetflixResolve(BaseModel):
  season:int|None=None
  episode:int|None=None
 
+class NetflixViewingDecision(BaseModel):
+ decision:str
+ kind:str|None=None
+ tmdb_id:int|None=None
+ season:int|None=None
+ episode:int|None=None
+
+@app.post('/api/import/netflix/unmatched/{row_id}/decision')
+def netflix_viewing_decision(row_id:int,payload:NetflixViewingDecision):
+ if payload.decision not in ('not_watched','started'):raise HTTPException(400,'Décision invalide')
+ if payload.decision=='started':
+  if payload.kind not in ('movie','tv') or not payload.tmdb_id or payload.tmdb_id<=0:raise HTTPException(400,'Film ou série TMDB requis')
+  if payload.kind=='tv' and (payload.season is None or payload.episode is None or payload.season<0 or payload.episode<=0):raise HTTPException(400,'Épisode requis')
+  details=tmdb(f'{payload.kind}/{payload.tmdb_id}')
+  if payload.kind=='tv':
+   eps=tmdb(f'tv/{payload.tmdb_id}/season/{payload.season}').get('episodes',[])
+   if not any(e.get('episode_number')==payload.episode for e in eps):raise HTTPException(400,'Épisode absent de TMDB')
+  title=details.get('title') or details.get('name')
+  if not title:raise HTTPException(400,'Titre TMDB introuvable')
+ with closing(conn()) as c:
+  c.execute('BEGIN IMMEDIATE')
+  row=c.execute("SELECT * FROM netflix_unmatched WHERE id=? AND status='pending'",(row_id,)).fetchone()
+  if not row:raise HTTPException(404,'Élément déjà traité ou introuvable')
+  if payload.decision=='started':
+   c.execute("INSERT OR IGNORE INTO library(kind,tmdb_id,title,poster,status,watched) VALUES(?,?,?,?,?,0)",(payload.kind,payload.tmdb_id,title,details.get('poster_path'),'watching'))
+   if payload.kind=='movie':c.execute("UPDATE library SET status='watching' WHERE kind='movie' AND tmdb_id=? AND watched=0",(payload.tmdb_id,))
+   c.execute('CREATE TABLE IF NOT EXISTS netflix_started_episodes(row_id INTEGER PRIMARY KEY,tmdb_id INTEGER NOT NULL,season INTEGER NOT NULL,episode INTEGER NOT NULL,started_at TEXT NOT NULL)')
+   if payload.kind=='tv':c.execute('INSERT OR REPLACE INTO netflix_started_episodes(row_id,tmdb_id,season,episode,started_at) VALUES(?,?,?,?,?)',(row_id,payload.tmdb_id,payload.season,payload.episode,row['viewed_at']))
+  c.execute('UPDATE netflix_unmatched SET status=?,resolved_kind=?,resolved_tmdb_id=?,resolved_season=?,resolved_episode=? WHERE id=?',('started' if payload.decision=='started' else 'not_watched',payload.kind if payload.decision=='started' else None,payload.tmdb_id if payload.decision=='started' else None,payload.season if payload.decision=='started' else None,payload.episode if payload.decision=='started' else None,row_id))
+  c.execute('DELETE FROM netflix_ai_suggestions WHERE row_id=?',(row_id,))
+  c.commit()
+ return {'ok':True,'status':payload.decision}
+
 @app.get('/api/import/netflix/unmatched')
 def netflix_unmatched(status:str='pending'):
  if status not in ('pending','resolved'):raise HTTPException(400,'Statut invalide')
