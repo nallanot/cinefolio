@@ -14,7 +14,7 @@ def conn():
 def init():
  os.makedirs('/data',exist_ok=True)
  with closing(conn()) as c:
-  c.executescript('CREATE TABLE IF NOT EXISTS library(kind TEXT NOT NULL, tmdb_id INTEGER NOT NULL, title TEXT NOT NULL, poster TEXT, status TEXT DEFAULT "watchlist", watched INTEGER DEFAULT 0, rating INTEGER, PRIMARY KEY(kind,tmdb_id)); CREATE TABLE IF NOT EXISTS episodes(tmdb_id INTEGER NOT NULL, season INTEGER NOT NULL, episode INTEGER NOT NULL, watched_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(tmdb_id,season,episode));');c.execute('CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,username TEXT UNIQUE,display_name TEXT,salt TEXT,password_hash TEXT)');c.execute('CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY,expires INTEGER)');c.execute('CREATE TABLE IF NOT EXISTS netflix_unmatched(id INTEGER PRIMARY KEY, title TEXT NOT NULL, viewed_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT "pending", resolved_kind TEXT, resolved_tmdb_id INTEGER, resolved_season INTEGER, resolved_episode INTEGER, UNIQUE(title,viewed_at))');c.execute('CREATE TABLE IF NOT EXISTS netflix_ai_suggestions(row_id INTEGER PRIMARY KEY,proposal_json TEXT NOT NULL)');c.execute('CREATE TABLE IF NOT EXISTS netflix_series_memory(series_title TEXT PRIMARY KEY COLLATE NOCASE,tmdb_id INTEGER NOT NULL,confirmed_at TEXT DEFAULT CURRENT_TIMESTAMP)');c.execute('CREATE TABLE IF NOT EXISTS netflix_episode_memory(netflix_title TEXT PRIMARY KEY COLLATE NOCASE,tmdb_id INTEGER NOT NULL,season INTEGER NOT NULL,episode INTEGER NOT NULL,confirmed_at TEXT DEFAULT CURRENT_TIMESTAMP)');c.execute('CREATE TABLE IF NOT EXISTS tv_pins(tmdb_id INTEGER PRIMARY KEY,favorite INTEGER NOT NULL DEFAULT 0,up_next INTEGER NOT NULL DEFAULT 0)');c.execute('CREATE TABLE IF NOT EXISTS custom_providers(kind TEXT NOT NULL,tmdb_id INTEGER NOT NULL,name TEXT NOT NULL,provider_id INTEGER,logo_path TEXT,PRIMARY KEY(kind,tmdb_id,name))');c.commit()
+  c.executescript('CREATE TABLE IF NOT EXISTS library(kind TEXT NOT NULL, tmdb_id INTEGER NOT NULL, title TEXT NOT NULL, poster TEXT, status TEXT DEFAULT "watchlist", watched INTEGER DEFAULT 0, rating INTEGER, PRIMARY KEY(kind,tmdb_id)); CREATE TABLE IF NOT EXISTS episodes(tmdb_id INTEGER NOT NULL, season INTEGER NOT NULL, episode INTEGER NOT NULL, watched_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(tmdb_id,season,episode));');c.execute('CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,username TEXT UNIQUE,display_name TEXT,salt TEXT,password_hash TEXT)');c.execute('CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY,expires INTEGER)');c.execute('CREATE TABLE IF NOT EXISTS netflix_unmatched(id INTEGER PRIMARY KEY, title TEXT NOT NULL, viewed_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT "pending", resolved_kind TEXT, resolved_tmdb_id INTEGER, resolved_season INTEGER, resolved_episode INTEGER, UNIQUE(title,viewed_at))');c.execute('CREATE TABLE IF NOT EXISTS netflix_ai_suggestions(row_id INTEGER PRIMARY KEY,proposal_json TEXT NOT NULL)');c.execute('CREATE TABLE IF NOT EXISTS tv_season_totals(tmdb_id INTEGER NOT NULL,season INTEGER NOT NULL,total INTEGER NOT NULL,PRIMARY KEY(tmdb_id,season))');c.execute('CREATE TABLE IF NOT EXISTS netflix_series_memory(series_title TEXT PRIMARY KEY COLLATE NOCASE,tmdb_id INTEGER NOT NULL,confirmed_at TEXT DEFAULT CURRENT_TIMESTAMP)');c.execute('CREATE TABLE IF NOT EXISTS netflix_episode_memory(netflix_title TEXT PRIMARY KEY COLLATE NOCASE,tmdb_id INTEGER NOT NULL,season INTEGER NOT NULL,episode INTEGER NOT NULL,confirmed_at TEXT DEFAULT CURRENT_TIMESTAMP)');c.execute('CREATE TABLE IF NOT EXISTS tv_pins(tmdb_id INTEGER PRIMARY KEY,favorite INTEGER NOT NULL DEFAULT 0,up_next INTEGER NOT NULL DEFAULT 0)');c.execute('CREATE TABLE IF NOT EXISTS custom_providers(kind TEXT NOT NULL,tmdb_id INTEGER NOT NULL,name TEXT NOT NULL,provider_id INTEGER,logo_path TEXT,PRIMARY KEY(kind,tmdb_id,name))');c.commit()
 
 class Credentials(BaseModel):
  username:str
@@ -146,7 +146,7 @@ def search(q:str):
 @app.get('/api/library')
 def library():
  with closing(conn()) as c:
-  return [dict(x) for x in c.execute("""SELECT l.*,COALESCE(p.favorite,0) AS favorite,COALESCE(p.up_next,0) AS up_next,CASE WHEN l.kind='tv' THEN (SELECT COUNT(*) FROM episodes e WHERE e.tmdb_id=l.tmdb_id) ELSE 0 END AS watched_episodes_count FROM library l LEFT JOIN tv_pins p ON l.kind='tv' AND l.tmdb_id=p.tmdb_id ORDER BY l.title COLLATE NOCASE""")]
+  return [dict(x) for x in c.execute("""SELECT l.*,COALESCE(p.favorite,0) AS favorite,COALESCE(p.up_next,0) AS up_next,CASE WHEN l.kind='tv' THEN (SELECT COUNT(*) FROM episodes e WHERE e.tmdb_id=l.tmdb_id AND e.season>0) ELSE 0 END AS watched_episodes_count,CASE WHEN l.kind='tv' THEN (SELECT SUM(t.total) FROM tv_season_totals t WHERE t.tmdb_id=l.tmdb_id) ELSE NULL END AS total_episodes_cached FROM library l LEFT JOIN tv_pins p ON l.kind='tv' AND l.tmdb_id=p.tmdb_id ORDER BY l.title COLLATE NOCASE""")]
 
 class TVPinUpdate(BaseModel):
  favorite:bool|None=None
@@ -185,10 +185,23 @@ def movie(id:int):
 @app.get('/api/tv/{id}')
 def show(id:int):
  data=tmdb(f'tv/{id}')
- with closing(conn()) as c:data['watched_episodes']=[dict(x) for x in c.execute('SELECT season,episode FROM episodes WHERE tmdb_id=?',(id,))]
+ with closing(conn()) as c:
+  for season_item in data.get('seasons',[]):
+   number=season_item.get('season_number')
+   count=season_item.get('episode_count')
+   if number is not None and number>0 and count is not None:
+    c.execute('INSERT OR IGNORE INTO tv_season_totals(tmdb_id,season,total) VALUES(?,?,?)',(id,number,int(count)))
+  c.commit()
+  data['watched_episodes']=[dict(x) for x in c.execute('SELECT season,episode FROM episodes WHERE tmdb_id=?',(id,))]
  return data
 @app.get('/api/tv/{id}/season/{season}')
-def season(id:int,season:int):return tmdb(f'tv/{id}/season/{season}')
+def season(id:int,season:int):
+ data=tmdb(f'tv/{id}/season/{season}')
+ if season>0:
+  with closing(conn()) as c:
+   c.execute('INSERT OR REPLACE INTO tv_season_totals(tmdb_id,season,total) VALUES(?,?,?)',(id,season,len(data.get('episodes') or [])))
+   c.commit()
+ return data
 @app.post('/api/episode')
 def episode(e:Episode):
  with closing(conn()) as c:
