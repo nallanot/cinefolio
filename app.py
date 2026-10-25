@@ -200,6 +200,23 @@ def episode(e:Episode):
 def home():return open('/app/index.html').read()
 
 from datetime import date, timedelta
+@app.get('/api/tv/progress')
+def tv_progress():
+ """Fast per-series progress independent of TMDB and the calendar dashboard."""
+ with closing(conn()) as c:
+  shows=c.execute("SELECT tmdb_id FROM library WHERE kind='tv'").fetchall()
+  counts={r['tmdb_id']:r['n'] for r in c.execute('SELECT tmdb_id,COUNT(*) AS n FROM episodes GROUP BY tmdb_id')}
+ result=[]
+ for row in shows:
+  mid=row['tmdb_id'];watched=counts.get(mid,0)
+  try:
+   detail=tmdb(f'tv/{mid}')
+   total=sum(int(season.get('episode_count') or 0) for season in detail.get('seasons',[]) if season.get('season_number',0)>0)
+   result.append({'tmdb_id':mid,'watched':watched,'total':total,'percent':round(100*watched/total) if total else 0})
+  except Exception:
+   result.append({'tmdb_id':mid,'watched':watched,'total':None,'percent':None})
+ return result
+
 @app.get('/api/dashboard')
 def dashboard(days:int=30):
  days=max(1,min(days,120)); today=date.today(); until=today+timedelta(days=days)
