@@ -146,7 +146,7 @@ def search(q:str):
 @app.get('/api/library')
 def library():
  with closing(conn()) as c:
-  return [dict(x) for x in c.execute("""SELECT l.*,COALESCE(p.favorite,0) AS favorite,COALESCE(p.up_next,0) AS up_next FROM library l LEFT JOIN tv_pins p ON l.kind='tv' AND l.tmdb_id=p.tmdb_id ORDER BY l.title COLLATE NOCASE""")]
+  return [dict(x) for x in c.execute("""SELECT l.*,COALESCE(p.favorite,0) AS favorite,COALESCE(p.up_next,0) AS up_next,CASE WHEN l.kind='tv' THEN (SELECT COUNT(*) FROM episodes e WHERE e.tmdb_id=l.tmdb_id) ELSE 0 END AS watched_episodes_count FROM library l LEFT JOIN tv_pins p ON l.kind='tv' AND l.tmdb_id=p.tmdb_id ORDER BY l.title COLLATE NOCASE""")]
 
 class TVPinUpdate(BaseModel):
  favorite:bool|None=None
