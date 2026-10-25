@@ -20,7 +20,13 @@ async function refresh(){try{state.library=await api('/api/library');render();lo
 async function loadTVProgress(){try{state.tvProgress=await api('/api/tv/progress');if(state.tab==='tv'&&!state.selected)render()}catch(e){console.warn('Progression séries indisponible',e);if(state.tab==='tv'&&!state.selected)render()}}
 async function dashboard(){try{state.dashboard=await api('/api/dashboard?days=30');try{state.viewingHistory=await api('/api/viewing-history')}catch(e){console.warn('Historique indisponible',e)}render()}catch(e){toast(e.message);render()}}
 function viewingPercent(watched,total){if(!total)return 0;const ratio=Math.max(0,Math.min(1,watched/total));return watched<total?Math.min(99,Math.round(ratio*100)):100}
-function progressFor(id){const live=state.tvProgress?.find(x=>x.tmdb_id===id);const dashboard=state.dashboard?.progress?.find(x=>x.tmdb_id===id);const local=state.library.find(x=>x.kind==='tv'&&x.tmdb_id===id);return {...(dashboard||{}),...(live||{}),watched:local?.watched_episodes_count??live?.watched??dashboard?.watched??0,total:live?.total??dashboard?.total??dashboard?.aired??null}}
+function progressFor(id){
+ const verified=state.tvProgress?.find(x=>x.tmdb_id===id);
+ const dashboard=state.dashboard?.progress?.find(x=>x.tmdb_id===id);
+ if(verified?.verified)return verified;
+ if(dashboard&&!dashboard.error)return dashboard;
+ return verified||null;
+}
 function progressBar(p){
  const watched=Math.max(0,Number(p?.watched)||0);
  const total=Number(p?.total??p?.aired)||0;
