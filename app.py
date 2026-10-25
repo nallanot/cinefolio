@@ -202,19 +202,27 @@ def home():return open('/app/index.html').read()
 from datetime import date, timedelta
 @app.get('/api/tv/progress')
 def tv_progress():
- """Fast per-series progress independent of TMDB and the calendar dashboard."""
+ """Match the detail screen: count watched episodes that actually exist in TMDB seasons."""
  with closing(conn()) as c:
-  shows=c.execute("SELECT tmdb_id FROM library WHERE kind='tv'").fetchall()
-  counts={r['tmdb_id']:r['n'] for r in c.execute('SELECT tmdb_id,COUNT(*) AS n FROM episodes GROUP BY tmdb_id')}
+  shows=[r['tmdb_id'] for r in c.execute("SELECT tmdb_id FROM library WHERE kind='tv'")]
+  seen={}
+  for row in c.execute('SELECT tmdb_id,season,episode FROM episodes'):
+   seen.setdefault(row['tmdb_id'],set()).add((row['season'],row['episode']))
  result=[]
- for row in shows:
-  mid=row['tmdb_id'];watched=counts.get(mid,0)
+ for mid in shows:
+  watched_set=seen.get(mid,set())
   try:
    detail=tmdb(f'tv/{mid}')
-   total=sum(int(season.get('episode_count') or 0) for season in detail.get('seasons',[]) if season.get('season_number',0)>0)
-   result.append({'tmdb_id':mid,'watched':watched,'total':total,'percent':round(100*watched/total) if total else 0})
+   seasons=[int(season['season_number']) for season in detail.get('seasons',[]) if int(season.get('season_number',0))>0]
+   valid=set()
+   for number in seasons:
+    season_data=tmdb(f'tv/{mid}/season/{number}')
+    valid.update((number,int(ep['episode_number'])) for ep in season_data.get('episodes',[]) if ep.get('episode_number') is not None)
+   watched=len(watched_set & valid)
+   total=len(valid)
+   result.append({'tmdb_id':mid,'watched':watched,'total':total,'percent':round(100*watched/total) if total else 0,'verified':True})
   except Exception:
-   result.append({'tmdb_id':mid,'watched':watched,'total':None,'percent':None})
+   result.append({'tmdb_id':mid,'watched':len(watched_set),'total':None,'percent':None,'verified':False})
  return result
 
 @app.get('/api/dashboard')
