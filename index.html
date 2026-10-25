@@ -17,7 +17,7 @@ function toast(t){const el=$('#toast');el.textContent=t;el.classList.remove('hid
 function nav(){const html=tabs.map(([id,icon,label])=>'<button class="'+(state.tab===id?'active':'')+'" data-tab="'+id+'">'+icon+' &nbsp;'+label+'</button>').join('');$('#nav').innerHTML=html;$('#bottomnav').innerHTML=html;document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>switchTab(b.dataset.tab))}
 function switchTab(tab){state.tab=tab;state.selected=null;nav();render();if(tab==='unmatched')loadUnmatched();window.scrollTo({top:0,behavior:'smooth'})}
 async function refresh(){try{state.library=await api('/api/library');render();loadTVProgress()}catch(e){toast(e.message);render()}}
-async function loadTVProgress(){try{state.tvProgress=await api('/api/tv/progress');if(state.tab==='tv'&&!state.selected)render()}catch(e){console.warn('Progression séries indisponible',e);if(state.tab==='tv'&&!state.selected)render()}}
+async function loadTVProgress(){try{state.tvProgress=await api('/api/series-progress');if(state.tab==='tv'&&!state.selected)render()}catch(e){console.warn('Progression séries indisponible',e);if(state.tab==='tv'&&!state.selected)render()}}
 async function dashboard(){try{state.dashboard=await api('/api/dashboard?days=30');try{state.viewingHistory=await api('/api/viewing-history')}catch(e){console.warn('Historique indisponible',e)}render()}catch(e){toast(e.message);render()}}
 function viewingPercent(watched,total){if(!total)return 0;const ratio=Math.max(0,Math.min(1,watched/total));return watched<total?Math.min(99,Math.round(ratio*100)):100}
 function progressFor(id){
