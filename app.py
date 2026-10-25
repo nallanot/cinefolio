@@ -14,7 +14,7 @@ def conn():
 def init():
  os.makedirs('/data',exist_ok=True)
  with closing(conn()) as c:
-  c.executescript('CREATE TABLE IF NOT EXISTS library(kind TEXT NOT NULL, tmdb_id INTEGER NOT NULL, title TEXT NOT NULL, poster TEXT, status TEXT DEFAULT "watchlist", watched INTEGER DEFAULT 0, rating INTEGER, PRIMARY KEY(kind,tmdb_id)); CREATE TABLE IF NOT EXISTS episodes(tmdb_id INTEGER NOT NULL, season INTEGER NOT NULL, episode INTEGER NOT NULL, watched_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(tmdb_id,season,episode));');c.execute('CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,username TEXT UNIQUE,display_name TEXT,salt TEXT,password_hash TEXT)');c.execute('CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY,expires INTEGER)');c.execute('CREATE TABLE IF NOT EXISTS netflix_unmatched(id INTEGER PRIMARY KEY, title TEXT NOT NULL, viewed_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT "pending", resolved_kind TEXT, resolved_tmdb_id INTEGER, resolved_season INTEGER, resolved_episode INTEGER, UNIQUE(title,viewed_at))');c.execute('CREATE TABLE IF NOT EXISTS netflix_ai_suggestions(row_id INTEGER PRIMARY KEY,proposal_json TEXT NOT NULL)');c.execute('CREATE TABLE IF NOT EXISTS netflix_series_memory(series_title TEXT PRIMARY KEY COLLATE NOCASE,tmdb_id INTEGER NOT NULL,confirmed_at TEXT DEFAULT CURRENT_TIMESTAMP)');c.execute('CREATE TABLE IF NOT EXISTS netflix_episode_memory(netflix_title TEXT PRIMARY KEY COLLATE NOCASE,tmdb_id INTEGER NOT NULL,season INTEGER NOT NULL,episode INTEGER NOT NULL,confirmed_at TEXT DEFAULT CURRENT_TIMESTAMP)');c.execute('CREATE TABLE IF NOT EXISTS custom_providers(kind TEXT NOT NULL,tmdb_id INTEGER NOT NULL,name TEXT NOT NULL,provider_id INTEGER,logo_path TEXT,PRIMARY KEY(kind,tmdb_id,name))');c.commit()
+  c.executescript('CREATE TABLE IF NOT EXISTS library(kind TEXT NOT NULL, tmdb_id INTEGER NOT NULL, title TEXT NOT NULL, poster TEXT, status TEXT DEFAULT "watchlist", watched INTEGER DEFAULT 0, rating INTEGER, PRIMARY KEY(kind,tmdb_id)); CREATE TABLE IF NOT EXISTS episodes(tmdb_id INTEGER NOT NULL, season INTEGER NOT NULL, episode INTEGER NOT NULL, watched_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(tmdb_id,season,episode));');c.execute('CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,username TEXT UNIQUE,display_name TEXT,salt TEXT,password_hash TEXT)');c.execute('CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY,expires INTEGER)');c.execute('CREATE TABLE IF NOT EXISTS netflix_unmatched(id INTEGER PRIMARY KEY, title TEXT NOT NULL, viewed_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT "pending", resolved_kind TEXT, resolved_tmdb_id INTEGER, resolved_season INTEGER, resolved_episode INTEGER, UNIQUE(title,viewed_at))');c.execute('CREATE TABLE IF NOT EXISTS netflix_ai_suggestions(row_id INTEGER PRIMARY KEY,proposal_json TEXT NOT NULL)');c.execute('CREATE TABLE IF NOT EXISTS netflix_series_memory(series_title TEXT PRIMARY KEY COLLATE NOCASE,tmdb_id INTEGER NOT NULL,confirmed_at TEXT DEFAULT CURRENT_TIMESTAMP)');c.execute('CREATE TABLE IF NOT EXISTS netflix_episode_memory(netflix_title TEXT PRIMARY KEY COLLATE NOCASE,tmdb_id INTEGER NOT NULL,season INTEGER NOT NULL,episode INTEGER NOT NULL,confirmed_at TEXT DEFAULT CURRENT_TIMESTAMP)');c.execute('CREATE TABLE IF NOT EXISTS tv_pins(tmdb_id INTEGER PRIMARY KEY,favorite INTEGER NOT NULL DEFAULT 0,up_next INTEGER NOT NULL DEFAULT 0)');c.execute('CREATE TABLE IF NOT EXISTS custom_providers(kind TEXT NOT NULL,tmdb_id INTEGER NOT NULL,name TEXT NOT NULL,provider_id INTEGER,logo_path TEXT,PRIMARY KEY(kind,tmdb_id,name))');c.commit()
 
 class Credentials(BaseModel):
  username:str
@@ -145,7 +145,25 @@ def search(q:str):
  return tmdb('search/multi',{'query':q,'include_adult':'false'}).get('results',[])
 @app.get('/api/library')
 def library():
- with closing(conn()) as c:return [dict(x) for x in c.execute('SELECT * FROM library ORDER BY title')]
+ with closing(conn()) as c:
+  return [dict(x) for x in c.execute("""SELECT l.*,COALESCE(p.favorite,0) AS favorite,COALESCE(p.up_next,0) AS up_next FROM library l LEFT JOIN tv_pins p ON l.kind='tv' AND l.tmdb_id=p.tmdb_id ORDER BY l.title COLLATE NOCASE""")]
+
+class TVPinUpdate(BaseModel):
+ favorite:bool|None=None
+ up_next:bool|None=None
+
+@app.patch('/api/tv/{id}/pin')
+def update_tv_pin(id:int,payload:TVPinUpdate):
+ if payload.favorite is None and payload.up_next is None:raise HTTPException(400,'Aucune modification')
+ with closing(conn()) as c:
+  if not c.execute("SELECT 1 FROM library WHERE kind='tv' AND tmdb_id=?",(id,)).fetchone():raise HTTPException(404,'Série absente de la bibliothèque')
+  c.execute('INSERT OR IGNORE INTO tv_pins(tmdb_id) VALUES(?)',(id,))
+  if payload.favorite is not None:c.execute('UPDATE tv_pins SET favorite=? WHERE tmdb_id=?',(int(payload.favorite),id))
+  if payload.up_next is not None:c.execute('UPDATE tv_pins SET up_next=? WHERE tmdb_id=?',(int(payload.up_next),id))
+  c.commit()
+ return {'ok':True}
+
+
 @app.post('/api/library')
 def add(i:Item):
  if i.kind not in ('tv','movie'):raise HTTPException(400,'Type invalide')
