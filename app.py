@@ -202,27 +202,26 @@ def home():return open('/app/index.html').read()
 from datetime import date, timedelta
 @app.get('/api/series-progress')
 def tv_progress():
- """Match the detail screen: count watched episodes that actually exist in TMDB seasons."""
+ """Return reliable series totals with one TMDB request per series.
+ Local watched counts are always returned even when TMDB is unavailable."""
  with closing(conn()) as c:
   shows=[r['tmdb_id'] for r in c.execute("SELECT tmdb_id FROM library WHERE kind='tv'")]
-  seen={}
+  watched_by_show={}
   for row in c.execute('SELECT tmdb_id,season,episode FROM episodes'):
-   seen.setdefault(row['tmdb_id'],set()).add((row['season'],row['episode']))
+   if row['season']>0:watched_by_show.setdefault(row['tmdb_id'],set()).add((row['season'],row['episode']))
  result=[]
  for mid in shows:
-  watched_set=seen.get(mid,set())
+  watched=len(watched_by_show.get(mid,set()))
+  total=None
   try:
    detail=tmdb(f'tv/{mid}')
-   seasons=[int(season['season_number']) for season in detail.get('seasons',[]) if int(season.get('season_number',0))>0]
-   valid=set()
-   for number in seasons:
-    season_data=tmdb(f'tv/{mid}/season/{number}')
-    valid.update((number,int(ep['episode_number'])) for ep in season_data.get('episodes',[]) if ep.get('episode_number') is not None)
-   watched=len(watched_set & valid)
-   total=len(valid)
-   result.append({'tmdb_id':mid,'watched':watched,'total':total,'percent':round(100*watched/total) if total else 0,'verified':True})
-  except Exception:
-   result.append({'tmdb_id':mid,'watched':len(watched_set),'total':None,'percent':None,'verified':False})
+   seasons=detail.get('seasons') or []
+   total=sum(int(season.get('episode_count') or 0) for season in seasons if int(season.get('season_number') or 0)>0)
+   if total<=0:total=None
+  except Exception:pass
+  result.append({'tmdb_id':mid,'watched':watched,'total':total,
+    'percent':min(100,round(100*watched/total)) if total else None,
+    'verified':total is not None})
  return result
 
 @app.get('/api/dashboard')
