@@ -200,7 +200,7 @@ def episode(e:Episode):
 def home():return open('/app/index.html').read()
 
 from datetime import date, timedelta
-@app.get('/api/tv/progress')
+@app.get('/api/series-progress')
 def tv_progress():
  """Match the detail screen: count watched episodes that actually exist in TMDB seasons."""
  with closing(conn()) as c:
